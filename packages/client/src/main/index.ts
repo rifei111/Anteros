@@ -6,7 +6,9 @@
  * 2. 启动 / 守护内核子进程（`KernelClient`），内核事件转发给渲染进程
  * 3. 渲染进程 → 内核的 IPC 桥（所有内核调用都收在这里，页面拿不到管道名与 token）
  *
- * 数据目录：`app.getPath("userData")`，即 %APPDATA%\\Anteros —— 人格与记忆只存在这台电脑上。
+ * 数据目录：默认 `app.getPath("userData")`，即 %APPDATA%\\Anteros；
+ * 可用 `ANTEROS_DATA_DIR` 覆盖（自检/CI 隔离数据，内核也认这个 env）。
+ * 人格与记忆只存在这台电脑上。
  * 插件目录：开发期用仓库内 plugins/，打包后用 resources/plugins（electron-builder extraResources）。
  */
 
@@ -23,16 +25,34 @@ const MIN_WINDOW_HEIGHT = 640;
 
 /**
  * 自检（smoke）模式：只有显式设置环境变量才生效，默认行为完全不变。
- * - `ANTEROS_SMOKE_SCREENSHOT=<绝对路径.png>`：窗口就绪 5 秒后截图写盘并退出。
- * - `ANTEROS_SMOKE_SKIP_CONSENT=1`：仅标记"这是自检运行，声明闸未过也照常截图"。
- *   它不会勾选、不会绕过声明闸——首启时截到的就是声明闸本身。
+ * - `ANTEROS_SMOKE_SCREENSHOT=<绝对路径.png>`：自动走完指定视图后截图写盘并退出。
+ * - `ANTEROS_SMOKE_VIEW=consent|chat|admin`：截图哪个视图（默认 consent）。
+ *   consent = 停在声明闸；chat = 勾完九条、选预设、进聊天；
+ *   admin = 进聊天后打开管理面板。chat/admin 走的是真实 UI 点击，不是接口注入。
+ * - `ANTEROS_SMOKE_SKIP_CONSENT=1`：仅用于 consent 视图——声明闸未过也照常截图，不勾选、不绕过闸。
  */
+type SmokeView = "consent" | "chat" | "admin";
+
 const SMOKE_SCREENSHOT_PATH =
   typeof process.env.ANTEROS_SMOKE_SCREENSHOT === "string" && process.env.ANTEROS_SMOKE_SCREENSHOT.length > 0
     ? process.env.ANTEROS_SMOKE_SCREENSHOT
     : null;
 const SMOKE_SKIP_CONSENT = process.env.ANTEROS_SMOKE_SKIP_CONSENT === "1";
-const SMOKE_DELAY_MS = 5_000;
+const SMOKE_VIEW: SmokeView =
+  process.env.ANTEROS_SMOKE_VIEW === "chat"
+    ? "chat"
+    : process.env.ANTEROS_SMOKE_VIEW === "admin"
+      ? "admin"
+      : "consent";
+const SMOKE_SETTLE_MS = 2_000;
+const SMOKE_TIMEOUT_MS = 20_000;
+
+/** 数据目录可用 ANTEROS_DATA_DIR 覆盖（自检隔离数据，不污染 %APPDATA%\\Anteros）。 */
+function resolveDataDir(): string {
+  const override = process.env.ANTEROS_DATA_DIR;
+  if (typeof override === "string" && override.trim().length > 0) return override;
+  return app.getPath("userData");
+}
 
 /** 必须在 whenReady 之前设置，userData 才会是 %APPDATA%\\Anteros。 */
 app.setName("Anteros");
@@ -178,26 +198,120 @@ function createWindow(): BrowserWindow {
   return window;
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function scriptInPage(window: BrowserWindow, script: string): Promise<unknown> {
+  return window.webContents.executeJavaScript(script, true);
+}
+
+/** 轮询页面里的表达式，直到为真；用于等真实 UI 状态切换（不伪造等待）。 */
+async function waitForPage(window: BrowserWindow, predicate: string, what: string): Promise<void> {
+  const deadline = Date.now() + SMOKE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (window.isDestroyed() || window.webContents.isDestroyed()) throw new Error("窗口已关闭");
+    const ready = await scriptInPage(window, `Boolean(${predicate})`).catch(() => false);
+    if (ready === true) return;
+    await sleep(250);
+  }
+  throw new Error(`等待「${what}」超时`);
+}
+
+/**
+ * 真实 UI 路线：逐条勾完九条 → 进入 → 选预设 → 开始聊天。
+ * 全是真实的 DOM 点击（走组件自己的 handler），不做接口注入，也不跳过声明闸。
+ */
+async function driveToChat(window: BrowserWindow): Promise<void> {
+  await waitForPage(
+    window,
+    `document.querySelector(".consent-card, .onboarding-card, .chat")`,
+    "首屏（声明闸/引导/聊天）",
+  );
+
+  const hasConsentGate = await scriptInPage(window, `Boolean(document.querySelector(".consent-card"))`);
+  if (hasConsentGate === true) {
+    const checked = await scriptInPage(
+      window,
+      `(() => {
+        const boxes = Array.from(document.querySelectorAll(".consent-list input[type=checkbox]"));
+        for (const box of boxes) box.click();
+        return boxes.length;
+      })()`,
+    );
+    console.warn(`[anteros] 自检：已勾选声明 ${String(checked)} 条`);
+    await waitForPage(
+      window,
+      `(() => { const b = document.querySelector(".consent-actions .btn-primary"); return Boolean(b) && !b.disabled; })()`,
+      "「进入」按钮可用",
+    );
+    await scriptInPage(window, `(document.querySelector(".consent-actions .btn-primary")?.click(), true)`);
+    await waitForPage(window, `!document.querySelector(".consent-card")`, "离开声明闸");
+  }
+
+  await waitForPage(window, `document.querySelector(".onboarding-card, .chat")`, "引导或聊天界面");
+  const hasOnboarding = await scriptInPage(window, `Boolean(document.querySelector(".onboarding-card"))`);
+  if (hasOnboarding === true) {
+    await scriptInPage(
+      window,
+      `(() => { const card = document.querySelector(".preset-card"); if (card) card.click(); return Boolean(card); })()`,
+    );
+    await sleep(400);
+    await waitForPage(
+      window,
+      `(() => { const b = document.querySelector(".onboarding-foot .btn-primary"); return Boolean(b) && !b.disabled; })()`,
+      "「开始聊天」按钮可用",
+    );
+    await scriptInPage(window, `(document.querySelector(".onboarding-foot .btn-primary")?.click(), true)`);
+    await waitForPage(window, `document.querySelector(".chat")`, "聊天界面");
+  }
+}
+
+async function openAdminPanel(window: BrowserWindow): Promise<void> {
+  await scriptInPage(
+    window,
+    `(() => {
+      const gear = Array.from(document.querySelectorAll("button")).find((b) =>
+        ((b.getAttribute("aria-label") || "") + (b.getAttribute("title") || "")).includes("管理面板"));
+      if (gear) gear.click();
+      return Boolean(gear);
+    })()`,
+  );
+  await waitForPage(window, `document.querySelector(".admin-drawer")`, "管理面板");
+}
+
+async function captureSmokeScreenshot(window: BrowserWindow, targetPath: string): Promise<void> {
+  const image = await window.webContents.capturePage();
+  await mkdir(dirname(targetPath), { recursive: true });
+  await writeFile(targetPath, image.toPNG());
+  console.warn(`[anteros] 自检截图已写入 ${targetPath}`);
+}
+
 function scheduleSmokeScreenshot(window: BrowserWindow): void {
   const targetPath = SMOKE_SCREENSHOT_PATH;
   if (!targetPath) return;
-  if (SMOKE_SKIP_CONSENT) {
+  if (SMOKE_VIEW === "consent" && SMOKE_SKIP_CONSENT) {
     console.warn("[anteros] 自检模式：声明闸未过也照常截图（不勾选，也不绕过声明闸本身）");
   }
   const timer = setTimeout(() => {
     void (async () => {
       try {
-        const image = await window.webContents.capturePage();
-        await mkdir(dirname(targetPath), { recursive: true });
-        await writeFile(targetPath, image.toPNG());
-        console.warn(`[anteros] 自检截图已写入 ${targetPath}`);
+        if (SMOKE_VIEW !== "consent") {
+          await driveToChat(window);
+          if (SMOKE_VIEW === "admin") await openAdminPanel(window);
+        }
+        await sleep(SMOKE_SETTLE_MS);
+        await captureSmokeScreenshot(window, targetPath);
       } catch (error) {
-        console.error("[anteros] 自检截图失败:", error);
+        console.error("[anteros] 自检流程失败，仍尝试截图：", error);
+        try {
+          await captureSmokeScreenshot(window, targetPath);
+        } catch (captureError) {
+          console.error("[anteros] 自检截图失败:", captureError);
+        }
       } finally {
         quitGracefully(0);
       }
     })();
-  }, SMOKE_DELAY_MS);
+  }, 800);
   timer.unref();
 }
 
@@ -232,8 +346,8 @@ if (!gotLock) {
     // Windows 客户端不提供原生菜单栏（自绘在页面内）
     Menu.setApplicationMenu(null);
 
-    // %APPDATA%\Anteros —— 与内核 ANTEROS_DATA_DIR 同一个目录
-    const dataDir = app.getPath("userData");
+    // 默认 %APPDATA%\Anteros；可用 ANTEROS_DATA_DIR 覆盖（自检/CI 隔离数据）
+    const dataDir = resolveDataDir();
     // 开发期：仓库根 plugins/；打包后：resources/plugins
     const pluginsDir = app.isPackaged
       ? join(process.resourcesPath, "plugins")

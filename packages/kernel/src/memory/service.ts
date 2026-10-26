@@ -206,7 +206,10 @@ export class MemoryService implements MemoryPort {
     }
 
     // 值变了 → 旧行 superseded_by 指向新行，历史保留（可回溯"它改过什么看法"）
+    // 注意：schema 的唯一索引是「当前行」部分索引，插新行前必须先把旧行移出当前集，
+    // 否则 (agent_id, slot_key) 撞唯一约束；所以先占位（-1）再回填真实新行 id。
     return this.db.tx(() => {
+      this.db.run("UPDATE memory_semantic SET superseded_by = -1 WHERE id = ?", [existing.id]);
       const newId = insertSemantic(this.db, {
         agentId: input.agentId,
         slotKey: input.slotKey,

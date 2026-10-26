@@ -1,6 +1,8 @@
 appId: com.anteros.app
 productName: Anteros
 copyright: Copyright © 2026 rifei111
+# electron-builder 不接受 ^ 版本范围（它要按确切版本下载平台二进制），显式钉死实际安装版本。
+electronVersion: 45.0.0
 directories:
   output: ../../release
   buildResources: build

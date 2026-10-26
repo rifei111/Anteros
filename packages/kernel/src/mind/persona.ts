@@ -15,7 +15,7 @@ import type { KernelDeps } from "../contracts.js";
 import { mergeTraits, projectMbti, sampleTraits } from "./traits.js";
 
 /** 新建人格的年龄锚点：小满 23 岁（出生日期固定，保证 age 可复现）。 */
-const XIAOMAN_BIRTH_TS = Date.UTC(2003, 4, 12, 8, 0, 0);
+export const XIAOMAN_BIRTH_TS = Date.UTC(2003, 4, 12, 8, 0, 0);
 
 export interface PersonaPresetSeed {
   id: string;

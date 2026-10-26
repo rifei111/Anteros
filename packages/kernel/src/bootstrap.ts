@@ -7,10 +7,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { DEFAULT_MONTHLY_BUDGET_CNY, DEFAULT_TRAITS } from "@anteros/shared";
+import { DEFAULT_MONTHLY_BUDGET_CNY } from "@anteros/shared";
 import { Db } from "./db/database.js";
 import { Logger } from "./util/log.js";
 import { randomHex } from "./util/crypto.js";
+import { DEFAULT_PRESET_ID, PERSONA_PRESETS, XIAOMAN_BIRTH_TS } from "./mind/persona.js";
 import { AuditService } from "./services/audit.js";
 import { ConsentService } from "./services/consent.js";
 import { PermissionsService } from "./services/permissions.js";
@@ -95,7 +96,7 @@ export function bootstrap(options: BootOptions = {}): Runtime {
   db.setMeta("installed_ts", db.getMeta("installed_ts") ?? String(now));
 
   const userId = seedUser(db, tz, now);
-  const personaId = seedPersona(db, now);
+  const personaId = seedPersona(db);
   const agentId = seedAgent(db, userId, personaId, now);
   seedOwner(db, userId, now);
   seedAgentState(db, agentId, now);
@@ -144,24 +145,25 @@ function seedUser(db: Db, tz: string, now: number): number {
   return result.lastInsertRowid;
 }
 
-function seedPersona(db: Db, now: number): number {
+/**
+ * 人格只允许有一个真源：mind/persona.ts 的默认预设。
+ * 这里不另写一份人设文案——否则"bootstrap 建的"和"人格层懒创建的"会分裂成两个人。
+ */
+function seedPersona(db: Db): number {
   const existing = db.get<{ id: number }>("SELECT id FROM personas ORDER BY id LIMIT 1");
   if (existing) return existing.id;
-  const birthTs = now - 22 * 365 * 24 * 3600 * 1000; // 年龄锚点：不可改
+  const preset = PERSONA_PRESETS.find((item) => item.id === DEFAULT_PRESET_ID) ?? PERSONA_PRESETS[0];
+  if (preset === undefined) throw new Error("默认人格预设缺失");
   const result = db.run(
     "INSERT INTO personas(name, birth_ts, city, traits, interests, immutable, speech_style) VALUES (?, ?, ?, ?, ?, ?, ?)",
     [
-      "小安",
-      birthTs,
-      "杭州",
-      JSON.stringify(DEFAULT_TRAITS),
-      JSON.stringify(["纪录片", "散步时听播客", "琢磨吃的"]),
-      JSON.stringify({
-        background: "在另一座城市生活，做一份普通的文字类工作。",
-        values: ["不喜欢被当成客服", "在意对方有没有认真听"],
-        taboo: ["被当成真人替身去骗人"],
-      }),
-      JSON.stringify({ habits: [], punctuation: "自然", sentenceLength: "偏短" }),
+      preset.persona.name,
+      XIAOMAN_BIRTH_TS, // 年龄锚点：不可改
+      preset.persona.city,
+      JSON.stringify(preset.persona.traits),
+      JSON.stringify(preset.persona.interests),
+      JSON.stringify(preset.persona.immutable),
+      JSON.stringify(preset.persona.speechStyle),
     ],
   );
   return result.lastInsertRowid;

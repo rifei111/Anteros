@@ -16,13 +16,28 @@ import { Rng } from "../util/rng.js";
 export const MAX_PART_CHARS = 25;
 export const MAX_PARTS = 3;
 
-/** 条间延迟按在场的区间（毫秒）；先采样再 clamp，保证"不是固定值"。 */
+/**
+ * 延迟按在场的区间（毫秒，草案 4.3）：先按 presence 缩放对数正态中位数，再 clamp。
+ * 说明：内核 turn 模型里"回复前的等待"被折叠进 typing + delay_after（chat.ts
+ * 先 typing 再发下一条），所以 delay_after 同时承担"在场节奏"；取值区间用
+ * 草案 4.3 的在场调制范围（phone 0.5–2s / idle 3–20s / busy 先短确认 /
+ * away、sleep 1–60min），不是一个固定常量。
+ */
 export const PRESENCE_DELAY_RANGE: Record<PresenceState, readonly [number, number]> = {
-  phone_in_hand: [800, 2000],
-  idle: [1200, 3000],
-  busy: [4000, 15_000],
-  sleep: [10_000, 60_000],
-  away: [30_000, 300_000],
+  phone_in_hand: [500, 2000],
+  idle: [3000, 20_000],
+  busy: [800, 4000],
+  sleep: [60_000, 3_600_000],
+  away: [60_000, 3_600_000],
+};
+
+/** 在场对延迟中位数的缩放（手机在手最快；睡眠/不在最慢）。 */
+export const PRESENCE_MEDIAN_FACTOR: Record<PresenceState, number> = {
+  phone_in_hand: 0.3,
+  idle: 1,
+  busy: 0.25,
+  sleep: 15,
+  away: 12,
 };
 
 const SENTENCE_SPLIT = /[。！？!?；;\n]+/;
@@ -82,11 +97,12 @@ export function semanticChunks(text: string): string[] {
         chunks.push(...hardWrap(clause));
         continue;
       }
-      if ((buffer + clause).length > MAX_PART_CHARS) {
+      const candidate = buffer.length === 0 ? clause : `${buffer}，${clause}`;
+      if (candidate.length > MAX_PART_CHARS) {
         if (buffer.length > 0) chunks.push(buffer);
         buffer = clause;
       } else {
-        buffer = buffer.length === 0 ? clause : `${buffer}，${clause}`;
+        buffer = candidate;
       }
     }
     if (buffer.length > 0) chunks.push(buffer);
@@ -152,9 +168,10 @@ export function typingMsFor(chars: number, traits: PersonaTraits, rng: Rng): num
   return Math.max(300, ms);
 }
 
-/** 条间延迟：对数正态 + 在场区间，独立采样。 */
+/** 延迟：对数正态（median 按在场缩放、sigma 来自人格）+ 在场区间，独立采样。 */
 export function delayAfterMsFor(traits: PersonaTraits, presence: PresenceState, rng: Rng): number {
-  const sampled = rng.logNormal(traits.delayMedianMs, traits.delaySigma);
+  const median = traits.delayMedianMs * PRESENCE_MEDIAN_FACTOR[presence];
+  const sampled = rng.logNormal(median, traits.delaySigma);
   const [min, max] = PRESENCE_DELAY_RANGE[presence];
   return Math.round(Math.min(max, Math.max(min, sampled)));
 }

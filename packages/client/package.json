@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Anteros Windows 主客户端（Electron）：聊天界面 + 声明闸 + 管理面板。",
+  "author": "rifei111",
   "main": "./out/main/index.cjs",
   "scripts": {
     "dev": "electron-vite dev",
