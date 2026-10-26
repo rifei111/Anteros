@@ -61,7 +61,9 @@ Anteros 不是"套壳聊天框"，也不是"微信机器人"。它的本体是�
 已实测通过（`npm.cmd run verify` + 真机跑打包产物）：
 
 - `tsc --noEmit` 全工作区 0 error，`vitest` 14 文件 / 80 用例全绿；
-- 内核端到端冒烟 25 项全过（真起内核进程 + 命名管道 + 声明闸拦截 + 分条与打字节奏 + 回放 + 成本账本 + 一键停用）；
+- 内核端到端冒烟 31 项全过（真起内核进程 + 命名管道 + 声明闸拦截 + 分条与打字节奏 + 回放 + 成本硬上限 + 导出入 + 审计不留正文 + 一键停用）；
+- 插件随内核自动拉起：`core.dashboard` / `core.memory-extract` / `core.tray-notify` / `core.world-info` 实测 `running`，
+  `core.media` 缺密钥时 `blocked`（不假成功），高危通道默认关闭；未过声明闸时插件只 `blocked`，勾完九条自动补启动；
 - NSIS 安装包可安装运行：声明闸九条 → 聊天界面 → 管理面板（Owner/人格/插件/通道/记忆/表达与完全体/主动消息/成本/模型/高级/数据，共 11 个页签）。
 
 
@@ -83,6 +85,10 @@ npm.cmd run smoke:kernel   # 内核端到端冒烟（真起进程 + 命名管道
 npm.cmd run verify         # 上面这些串起来一遍（CI 同款）
 npm.cmd run package        # 打 Windows NSIS 安装包到 release/
 ```
+
+> 打包会复用本机已安装的 Electron（`packages/client/electron-builder.yml` 里的
+> `electronDist: ../../node_modules/electron/dist`），不联网下载平台二进制；所以打安装包前
+> 必须保证 `node_modules/electron/dist/electron.exe` 存在。
 
 > 在 IDE / 自动化环境里启动 GUI 时注意：若父进程带着 `ELECTRON_RUN_AS_NODE=1`，
 > Electron 会退化成纯 Node 进程（内核子进程自己会设回 1，不受影响）。

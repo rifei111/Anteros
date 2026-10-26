@@ -3,6 +3,10 @@ productName: Anteros
 copyright: Copyright © 2026 rifei111
 # electron-builder 不接受 ^ 版本范围（它要按确切版本下载平台二进制），显式钉死实际安装版本。
 electronVersion: 45.0.0
+# 本机 GitHub releases 不可达，electron-builder 无法在线拉取 electron 平台二进制（会卡在
+# @electron/get 下载 SHASUMS256.txt 后抛 emitErrorCloseNT）。直接复用已安装的 electron 解包目录，
+# 完全跳过下载。
+electronDist: ../../node_modules/electron/dist
 directories:
   output: ../../release
   buildResources: build
