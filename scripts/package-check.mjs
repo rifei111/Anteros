@@ -77,14 +77,18 @@ function listDirs(p) {
 // ---------------------------------------------------------------- 1. 仓库产物
 function checkRepoArtifacts() {
   const clientOut = path.join(clientDir, "out");
+  // Electron 45 的 ESM 主进程对具名导出不兼容，主进程/preload 走 CJS（.cjs）输出；
+  // 兼容历史 .js 产物，两种后缀哪个存在算哪个。
   const requiredOut = [
-    ["main", path.join(clientOut, "main", "index.js")],
-    ["preload", path.join(clientOut, "preload", "index.js")],
-    ["renderer", path.join(clientOut, "renderer", "index.html")],
+    ["main", ["index.cjs", "index.js"]],
+    ["preload", ["index.cjs", "index.js"]],
+    ["renderer", ["index.html"]],
   ];
-  for (const [name, file] of requiredOut) {
-    if (exists(file)) ok(`客户端产物 out/${name}`, rel(file));
-    else err(`客户端产物 out/${name} 缺失`, `先运行 npm.cmd run build:client（期望 ${rel(file)}）`);
+  for (const [name, candidates] of requiredOut) {
+    const dir = path.join(clientOut, name);
+    const found = candidates.map((file) => path.join(dir, file)).find((file) => exists(file));
+    if (found) ok(`客户端产物 out/${name}`, rel(found));
+    else err(`客户端产物 out/${name} 缺失`, `先运行 npm.cmd run build:client（期望 ${rel(path.join(dir, candidates[0]))}）`);
   }
 
   const kernelFile = path.join(repoRoot, "packages", "kernel", "dist", "kernel.mjs");

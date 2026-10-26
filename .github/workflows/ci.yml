@@ -74,6 +74,10 @@ jobs:
       - name: Test
         run: npm.cmd run test
 
+      - name: Kernel end-to-end smoke (真起内核进程 + 命名管道)
+        # 不需要模型 Key：验证声明闸拦截、分条与打字节奏、回放、成本硬上限、导出入、一键停用
+        run: npm.cmd run smoke:kernel
+
       - name: Build client
         run: npm.cmd run build:client
 

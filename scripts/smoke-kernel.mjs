@@ -247,6 +247,31 @@ try {
   /* 10. 一键停用 */
   const panic = await call("channels.panicStop");
   check("一键停用返回可读结果", typeof panic.message === "string" && panic.message.length > 0, panic.message);
+
+  /* 11. 预算上限是硬项：把月预算调到 0 后必须直接拒绝，不是"继续但提醒" */
+  await call("cost.setBudget", { monthlyCny: 0 });
+  let budgetBlocked = false;
+  try {
+    await call("chat.send", { text: "预算为零还能说话吗", eventId: `smoke-budget-${Date.now()}` });
+  } catch (error) {
+    budgetBlocked = String(error.message).includes("EBLOCKED");
+  }
+  check("预算用尽时 chat.send 被硬拒（EBLOCKED）", budgetBlocked);
+  await call("cost.setBudget", { monthlyCny: 45 });
+
+  /* 12. 导出 / 导入：导出包存在、能读出表清单，导入后消息数不丢 */
+  const beforeCount = (await call("chat.history", { limit: 500 })).messages.length;
+  const bundle = await call("export.bundle");
+  check("导出数据包落盘", typeof bundle.path === "string" && fs.existsSync(bundle.path), `bytes=${bundle.bytes}`);
+  const imported = await call("import.bundle", { path: bundle.path });
+  check("导入数据包成功并报出表与行数", Array.isArray(imported.tables) && imported.tables.length >= 10 && imported.rows > 0, `tables=${imported.tables.length} rows=${imported.rows}`);
+  const afterCount = (await call("chat.history", { limit: 500 })).messages.length;
+  check("导入后消息条数一致", afterCount === beforeCount, `${beforeCount} -> ${afterCount}`);
+
+  /* 13. 审计：owner 危险操作留下追加记录（不存消息原文） */
+  const audit = await call("audit.list", { limit: 50 });
+  check("审计日志记录了 owner 操作", Array.isArray(audit) && audit.length >= 1, `entries=${audit.length}`);
+  check("审计里不出现消息正文", Array.isArray(audit) && !audit.some((entry) => JSON.stringify(entry).includes("今天有点累")));
 } catch (error) {
   check("端到端流程", false, error.message);
 } finally {
