@@ -10,7 +10,7 @@ Anteros 不是"套壳聊天框"，也不是"微信机器人"。它的本体是�
 ——记得住、有个体差异、有自己的生活节奏、会累会走神、表达不完美；同时守得住安全、
 隐私与法律边界。
 
-**下载**：[Anteros v0.1.0 安装包](https://github.com/rifei111/Anteros/releases/latest)（Windows 10/11 x64，未签名，SmartScreen 会提示未知发布者）。
+**下载**：[Anteros v0.2.0 安装包](https://github.com/rifei111/Anteros/releases/latest)（Windows 10/11 x64，未签名，SmartScreen 会提示未知发布者）。
 
 ## 形态（草案 14.14 / 14.15）
 
