@@ -1,0 +1,22 @@
+{
+  "id": "core.memory-extract",
+  "name": "记忆抽取（规则版）",
+  "version": "0.1.0",
+  "kernel_api": ">=1.0 <2.0",
+  "kind": "processor",
+  "description": "用规则把一批文本抽成候选记忆（情节、结构事实、未闭合话题），带 importance/entities/confidence。只产出候选，不写库、不写人设记忆，是否入库由内核决定。",
+  "entry": { "command": "index.mjs", "args": [] },
+  "capabilities": ["extract.memory"],
+  "permissions": [],
+  "risk_level": "low",
+  "enabled": true,
+  "healthcheck": { "method": "plugin.health.check", "interval_ms": 60000, "timeout_ms": 5000 },
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "maxTextsPerBatch": { "type": "integer", "minimum": 1, "default": 200 },
+      "maxCandidates": { "type": "integer", "minimum": 1, "default": 200 },
+      "minConfidence": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.35 }
+    }
+  }
+}

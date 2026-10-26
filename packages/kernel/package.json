@@ -1,0 +1,18 @@
+{
+  "name": "@anteros/kernel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/kernel.mjs",
+  "scripts": {
+    "build": "node ../../scripts/build-kernel.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@anteros/shared": "0.1.0",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "id": "core.dashboard",
+  "name": "只读看板",
+  "version": "0.1.0",
+  "kernel_api": ">=1.0 <2.0",
+  "kind": "ui",
+  "description": "返回只读看板描述块（运行时长、插件健康、成本摘要）。数据只来自 kernel.config 与插件自身运行时统计，不读数据库、不写任何状态。",
+  "entry": { "command": "index.mjs", "args": [] },
+  "capabilities": ["ui.panel"],
+  "permissions": ["kernel.config"],
+  "risk_level": "low",
+  "enabled": true,
+  "healthcheck": { "method": "plugin.health.check", "interval_ms": 60000, "timeout_ms": 5000 },
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "cost.spentCny": { "type": "number", "description": "本月已花费（由内核侧写入，插件只读）" },
+      "cost.monthlyBudgetCny": { "type": "number", "description": "月度预算上限" }
+    }
+  }
+}

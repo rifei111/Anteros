@@ -1,0 +1,20 @@
+{
+  "id": "channel.wechat-replica",
+  "name": "微信通道（未就绪适配器骨架）",
+  "version": "0.1.0",
+  "kernel_api": ">=1.0 <2.0",
+  "kind": "channel",
+  "description": "第三方通道适配器骨架：v0.1 不含任何已实现的读写、注入或逆向逻辑，健康检查返回 blocked。启用必须经过声明闸、体检与租约，且需用户自行安装并授权第三方通道组件；Anteros 不自带、不内置任何绕过手段。",
+  "entry": { "command": "index.mjs", "args": [] },
+  "capabilities": ["channel.read", "channel.history", "channel.write", "channel.lease", "channel.media"],
+  "permissions": [
+    "proc.read:Weixin.exe",
+    "proc.patch:Weixin.exe",
+    "ui.foreground",
+    "fs.read:%USERPROFILE%\\Documents\\WeChat Files"
+  ],
+  "risk_level": "high",
+  "enabled": false,
+  "resources": { "max_memory_mb": 256, "max_cpu_pct": 10, "call_timeout_ms": 90000 },
+  "healthcheck": { "method": "plugin.health.check", "interval_ms": 30000, "timeout_ms": 5000 }
+}

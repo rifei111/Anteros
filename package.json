@@ -1,0 +1,37 @@
+{
+  "name": "anteros",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Anteros — 常驻本机的拟人智能体（Windows 单机闭环：内核 + Windows 主客户端 + 插件）",
+  "license": "MIT",
+  "author": "rifei111",
+  "homepage": "https://github.com/rifei111/Anteros",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rifei111/Anteros.git"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build:shared": "tsc -p packages/shared/tsconfig.json",
+    "build:kernel": "node scripts/build-kernel.mjs",
+    "build:client": "npm run build -w @anteros/client",
+    "build": "npm run build:shared && npm run build:kernel && npm run build:client",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "npm run build:shared && npm run build:kernel && npm run dev -w @anteros/client",
+    "package": "npm run build && npm run package -w @anteros/client",
+    "lint": "node scripts/check-boundaries.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "esbuild": "^0.25.12",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

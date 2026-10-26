@@ -1,0 +1,27 @@
+{
+  "id": "core.llm-router",
+  "name": "LLM 路由（OpenAI 兼容）",
+  "version": "0.1.0",
+  "kernel_api": ">=1.0 <2.0",
+  "kind": "provider",
+  "description": "把内核的 plugin.llm.generate 请求转发到用户自备的 OpenAI 兼容 API。默认禁用；未配置时内核使用内置兜底客户端。密钥由内核注入环境变量，不落盘、不打印。",
+  "entry": { "command": "index.mjs", "args": [] },
+  "capabilities": ["llm.generate"],
+  "permissions": ["kernel.config", "secrets.read:llm.api_key"],
+  "risk_level": "medium",
+  "enabled": false,
+  "secrets": ["llm.api_key"],
+  "resources": { "max_memory_mb": 128, "max_cpu_pct": 10, "call_timeout_ms": 60000 },
+  "healthcheck": { "method": "plugin.health.check", "interval_ms": 30000, "timeout_ms": 5000 },
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "baseUrl": { "type": "string", "description": "OpenAI 兼容 API 根地址，如 https://api.example.com/v1" },
+      "model": { "type": "string", "description": "模型名，如 gpt-4o-mini" },
+      "temperature": { "type": "number", "minimum": 0, "maximum": 2, "default": 0.7 },
+      "maxTokens": { "type": "integer", "minimum": 1, "default": 1024 },
+      "timeoutMs": { "type": "integer", "minimum": 1000, "default": 30000 }
+    },
+    "required": ["baseUrl", "model"]
+  }
+}

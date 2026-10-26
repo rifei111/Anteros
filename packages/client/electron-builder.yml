@@ -1,0 +1,36 @@
+appId: com.anteros.app
+productName: Anteros
+copyright: Copyright © 2026 rifei111
+directories:
+  output: ../../release
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+  - "!**/*.map"
+extraResources:
+  - from: ../kernel/dist
+    to: kernel
+  - from: ../../plugins
+    to: plugins
+asar: true
+asarUnpack:
+  - resources/**
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: build/icon.ico
+  artifactName: Anteros-Setup-${version}-${arch}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Anteros
+  uninstallDisplayName: Anteros
+  license: ../../LICENSE
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  runAfterFinish: true

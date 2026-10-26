@@ -1,0 +1,24 @@
+{
+  "id": "core.media",
+  "name": "媒体能力（占位）",
+  "version": "0.1.0",
+  "kernel_api": ">=1.0 <2.0",
+  "kind": "media",
+  "description": "语音与图片能力的适配层。v0.1 未接入任何媒体供应商：未配置时返回 blocked，已配置也明确说明未实现，绝不假成功。",
+  "entry": { "command": "index.mjs", "args": [] },
+  "capabilities": ["media.speak", "media.image"],
+  "permissions": ["kernel.config", "secrets.read:media.api_key"],
+  "risk_level": "medium",
+  "enabled": true,
+  "secrets": ["media.api_key"],
+  "resources": { "max_memory_mb": 256, "max_cpu_pct": 10, "call_timeout_ms": 90000 },
+  "healthcheck": { "method": "plugin.health.check", "interval_ms": 30000, "timeout_ms": 5000 },
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "provider": { "type": "string", "enum": ["openai", "azure-openai", "local"], "description": "媒体服务类型；v0.1 均未接入" },
+      "speakModel": { "type": "string", "description": "TTS 模型名" },
+      "imageModel": { "type": "string", "description": "图片生成模型名" }
+    }
+  }
+}

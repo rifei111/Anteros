@@ -1,0 +1,14 @@
+{
+  "id": "core.tray-notify",
+  "name": "托盘通知桥",
+  "version": "0.1.0",
+  "kernel_api": ">=1.0 <2.0",
+  "kind": "channel",
+  "description": "把 plugin.notify.send 转交内核事件，由客户端决定托盘气泡或 App 内通知。插件进程不直接操作 Electron，也不重试；客户端不可用时由客户端退化为 App 通知。",
+  "entry": { "command": "index.mjs", "args": [] },
+  "capabilities": [],
+  "permissions": [],
+  "risk_level": "low",
+  "enabled": true,
+  "healthcheck": { "method": "plugin.health.check", "interval_ms": 30000, "timeout_ms": 5000 }
+}

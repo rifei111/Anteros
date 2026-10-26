@@ -1,0 +1,28 @@
+{
+  "id": "core.world-info",
+  "name": "世界信息（时间/天气/新闻）",
+  "version": "0.1.0",
+  "kernel_api": ">=1.0 <2.0",
+  "kind": "world",
+  "description": "向内核提供真实世界信息。时间取本机时钟与中文农历近似；天气仅在用户配置经纬度后访问 Open-Meteo，失败或未配置一律 degraded；新闻 v0.1 不抓取。任何情况都不编造数据。",
+  "entry": { "command": "index.mjs", "args": [] },
+  "capabilities": ["world.info"],
+  "permissions": ["kernel.config", "net.allow:api.open-meteo.com"],
+  "risk_level": "low",
+  "enabled": true,
+  "healthcheck": { "method": "plugin.health.check", "interval_ms": 60000, "timeout_ms": 5000 },
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "weather": {
+        "type": "object",
+        "properties": {
+          "latitude": { "type": "number", "minimum": -90, "maximum": 90 },
+          "longitude": { "type": "number", "minimum": -180, "maximum": 180 },
+          "timezone": { "type": "string", "default": "Asia/Shanghai" }
+        }
+      },
+      "news": { "type": "object", "properties": { "sourceUrl": { "type": "string" } } }
+    }
+  }
+}
