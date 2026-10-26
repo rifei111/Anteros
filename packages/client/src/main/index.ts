@@ -32,7 +32,6 @@ const MIN_WINDOW_HEIGHT = 640;
  * - `ANTEROS_SMOKE_SKIP_CONSENT=1`：仅用于 consent 视图——声明闸未过也照常截图，不勾选、不绕过闸。
  */
 type SmokeView = "consent" | "chat" | "admin";
-
 const SMOKE_SCREENSHOT_PATH =
   typeof process.env.ANTEROS_SMOKE_SCREENSHOT === "string" && process.env.ANTEROS_SMOKE_SCREENSHOT.length > 0
     ? process.env.ANTEROS_SMOKE_SCREENSHOT
@@ -46,6 +45,10 @@ const SMOKE_VIEW: SmokeView =
       : "consent";
 const SMOKE_SETTLE_MS = 2_000;
 const SMOKE_TIMEOUT_MS = 20_000;
+/** 自检时额外点开的页签文本（如「人格」）；留空就等于老行为。 */
+const SMOKE_TAB = (process.env.ANTEROS_SMOKE_TAB ?? "").trim();
+/** 自检时填进「人格」页签的人设原文并点一次「编译成人格内核」，用来验证这条链路真能跑。 */
+const SMOKE_PERSONA_TEXT = (process.env.ANTEROS_SMOKE_PERSONA_TEXT ?? "").trim();
 
 /** 数据目录可用 ANTEROS_DATA_DIR 覆盖（自检隔离数据，不污染 %APPDATA%\\Anteros）。 */
 function resolveDataDir(): string {
@@ -276,6 +279,67 @@ async function openAdminPanel(window: BrowserWindow): Promise<void> {
     })()`,
   );
   await waitForPage(window, `document.querySelector(".admin-drawer")`, "管理面板");
+  await openAdminTab(window);
+}
+
+/**
+ * 自检时切到指定页签（`ANTEROS_SMOKE_TAB=人格`）。
+ * 只是点击真实按钮，不预设任何状态；找不到就保持默认页签。
+ */
+async function openAdminTab(window: BrowserWindow): Promise<void> {
+  const label = SMOKE_TAB;
+  if (label.length === 0) return;
+  await scriptInPage(
+    window,
+    `(() => {
+      const wanted = ${JSON.stringify(label)};
+      const tab = Array.from(document.querySelectorAll(".admin-nav .admin-tab"))
+        .find((b) => (b.textContent || "").trim() === wanted);
+      if (tab) tab.click();
+      return Boolean(tab);
+    })()`,
+  );
+  await sleep(600);
+  await fillPersonaAndCompile(window);
+}
+
+/** 自检用：往人设输入框里写一段话并点「编译成人格内核」（真实 input 事件，走 React onChange）。 */
+async function fillPersonaAndCompile(window: BrowserWindow): Promise<void> {
+  if (SMOKE_PERSONA_TEXT.length === 0) return;
+  await scriptInPage(
+    window,
+    `(() => {
+      const text = ${JSON.stringify(SMOKE_PERSONA_TEXT)};
+      const area = document.querySelector(".admin-panel textarea");
+      if (!area) return false;
+      const setValue = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+      setValue.call(area, text);
+      area.dispatchEvent(new Event("input", { bubbles: true }));
+      return true;
+    })()`,
+  );
+  await sleep(400);
+  await scriptInPage(
+    window,
+    `(() => {
+      const button = Array.from(document.querySelectorAll(".admin-panel button"))
+        .find((b) => (b.textContent || "").includes("编译成人格内核"));
+      if (button) button.click();
+      return Boolean(button);
+    })()`,
+  );
+  await sleep(6_000);
+  // 编译结果里最关键的是数值内核那一段，自检截屏把它滚到视野里
+  await scriptInPage(
+    window,
+    `(() => {
+      const grid = document.querySelector(".param-grid") || document.querySelector(".blueprint-note");
+      if (!grid) return false;
+      grid.scrollIntoView({ block: "center" });
+      return true;
+    })()`,
+  );
+  await sleep(500);
 }
 
 async function captureSmokeScreenshot(window: BrowserWindow, targetPath: string): Promise<void> {

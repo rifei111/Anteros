@@ -9,7 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { KERNEL_API_VERSION, PIPE_PREFIX, AnterosError, ERROR_CODES } from "@anteros/shared";
-import type { AppSnapshot, HandshakeResult, Persona, PluginInfo, TurnReplay } from "@anteros/shared";
+import type { AppSnapshot, HandshakeResult, Persona, PersonaBlueprint, PluginInfo, TurnReplay } from "@anteros/shared";
 import type { Runtime } from "./bootstrap.js";
 import type { ChatDeps, ExpressionPort, KernelDeps, MemoryPort, MindPort, PluginHostPort } from "./contracts.js";
 import { loadOrCreateMasterKey } from "./util/crypto.js";
@@ -82,7 +82,7 @@ export class App {
     this.llm = new LlmClient(runtime.settings, masterKey);
 
     this.memory = new MemoryService(this.deps, this.llm);
-    this.mind = new MindService(this.deps, this.memory);
+    this.mind = new MindService(this.deps, this.memory, this.llm);
     this.expression = new ExpressionService(this.deps, this.mind, this.memory, this.llm);
 
     const pluginsDir = resolvePluginsDir();
@@ -284,6 +284,37 @@ export class App {
       }
       case "persona.presets":
         return { presets: this.mind.listPresets() };
+      case "persona.compile": {
+        this.runtime.permissions.assertOwner("编译人设文本");
+        this.runtime.consent.requireConsent();
+        const text = String(p.text ?? "").trim();
+        if (text.length < 4) {
+          throw new AnterosError(ERROR_CODES.EINVALID, "人设太短了：至少写一句她是谁、做什么、什么脾气");
+        }
+        const compiled = await this.mind.compileBlueprint(text.slice(0, 4000));
+        if (compiled.usage !== null) {
+          this.runtime.cost.record({
+            kind: "persona",
+            model: compiled.usage.model,
+            inputTokens: compiled.usage.inputTokens,
+            outputTokens: compiled.usage.outputTokens,
+          });
+        }
+        return compiled;
+      }
+      case "persona.applyBlueprint": {
+        this.runtime.permissions.assertOwner("应用人格内核");
+        const blueprint = p.blueprint as PersonaBlueprint | undefined;
+        if (blueprint === undefined || blueprint === null) {
+          throw new AnterosError(ERROR_CODES.EINVALID, "缺少要应用的人格内核草稿");
+        }
+        const persona = this.mind.applyBlueprint(blueprint);
+        this.runtime.audit.log("persona.apply_blueprint", {
+          actorRole: "owner",
+          after: { name: persona.name, engine: blueprint.engine, sourceLength: blueprint.sourceText.length },
+        });
+        return persona;
+      }
       case "persona.applyPreset": {
         this.runtime.permissions.assertOwner("套用人格预设");
         return this.mind.applyPreset(String(p.presetId));

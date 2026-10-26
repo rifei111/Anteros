@@ -28,6 +28,8 @@ import type {
   MemorySearchResult,
   OwnerStatus,
   Persona,
+  PersonaBlueprint,
+  PersonaCompileResult,
   PluginInfo,
   PluginStatus,
   RelationState,
@@ -125,6 +127,10 @@ export interface KernelApi {
   "persona.update": MethodSpec<{ patch: Partial<Persona> }, Persona>;
   "persona.presets": MethodSpec<Record<string, never>, { presets: PersonaPreset[] }>;
   "persona.applyPreset": MethodSpec<{ presetId: string }, Persona>;
+  /** 用一段人设文本编译人格内核（规则引擎优先，配了模型就让模型推导）。 */
+  "persona.compile": MethodSpec<{ text: string }, PersonaCompileResult>;
+  /** 把编译结果（用户可微调过）落库；等价于一次 owner 显式编辑人格。 */
+  "persona.applyBlueprint": MethodSpec<{ blueprint: PersonaBlueprint }, Persona>;
 
   "relation.get": MethodSpec<Record<string, never>, RelationState>;
   /** 完全体模式：owner 专属 + 二次确认 token（草案 2.8）。 */

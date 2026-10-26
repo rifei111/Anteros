@@ -6,13 +6,18 @@ export interface ModalProps {
   footer?: ReactNode;
   onClose: () => void;
   wide?: boolean;
+  /**
+   * 压在其他模态之上（z-index 95 而不是 90）。
+   * 二次确认永远要盖住触发它的那个弹窗，否则按钮点不到。
+   */
+  top?: boolean;
 }
 
 /** 通用模态（无原生 alert/confirm，全部自绘）。 */
-export function Modal({ title, children, footer, onClose, wide = false }: ModalProps) {
+export function Modal({ title, children, footer, onClose, wide = false, top = false }: ModalProps) {
   return (
     <div
-      className="modal-mask"
+      className={top ? "modal-mask modal-mask-top" : "modal-mask"}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -69,6 +74,7 @@ export function useConfirm(): { ask: (options: ConfirmOptions) => Promise<boolea
   const node = pending ? (
     <Modal
       title={pending.title}
+      top
       onClose={() => settle(false)}
       footer={
         <>

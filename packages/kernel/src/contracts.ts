@@ -15,6 +15,7 @@ import type {
   MemoryKind,
   MemorySearchResult,
   Persona,
+  PersonaBlueprint,
   PresenceState,
   RelationStage,
   RelationState,
@@ -58,6 +59,13 @@ export interface MindPort {
   updatePersona(patch: Partial<Persona>): Persona;
   listPresets(): Array<{ id: string; name: string; summary: string; persona: Omit<Persona, "id" | "birthTs"> }>;
   applyPreset(presetId: string): Persona;
+  /** 人设文本 → 人格内核草稿：规则引擎或模型推导，结果按草案区间钳住。 */
+  compileBlueprint(text: string): Promise<{
+    blueprint: PersonaBlueprint;
+    usage: { model: string; inputTokens: number; outputTokens: number } | null;
+  }>;
+  /** 把用户确认过（可能微调过）的草稿落库。 */
+  applyBlueprint(blueprint: PersonaBlueprint): Persona;
 
   /** 关系：intimacy 只允许由事件累加（规范 1 §3.3） */
   getRelation(): RelationState;
@@ -139,7 +147,7 @@ export interface LlmPort {
     temperature?: number;
     maxTokens?: number;
     json?: boolean;
-    purpose?: "reply" | "proactive" | "extract" | "world" | "narrative";
+    purpose?: "reply" | "proactive" | "extract" | "world" | "narrative" | "persona";
   }): Promise<LlmResult>;
   isConfigured(): boolean;
   status(): { configured: boolean; providerId: string | null; baseUrl: string | null; model: string | null; lastError: string | null };

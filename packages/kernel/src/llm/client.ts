@@ -60,7 +60,7 @@ export class LlmClient implements LlmPort {
     temperature?: number;
     maxTokens?: number;
     json?: boolean;
-    purpose?: "reply" | "proactive" | "extract" | "world" | "narrative";
+    purpose?: "reply" | "proactive" | "extract" | "world" | "narrative" | "persona";
   }): Promise<LlmResult> {
     const key = this.apiKey();
     if (!key) {

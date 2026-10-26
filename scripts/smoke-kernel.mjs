@@ -268,7 +268,23 @@ try {
   const afterCount = (await call("chat.history", { limit: 500 })).messages.length;
   check("导入后消息条数一致", afterCount === beforeCount, `${beforeCount} -> ${afterCount}`);
 
-  /* 13. 审计：owner 危险操作留下追加记录（不存消息原文） */
+  /* 13. 人设文本 → 人格内核：没配模型时必须走本地规则引擎，且能落库 */
+  const compiled = await call("persona.compile", {
+    text: "她叫林野，26 岁，在杭州做夜班护士，话不多，有点健忘，但记得住别人随口提过的事，喜欢下雨天和便利店的关东煮。",
+  });
+  const blueprint = compiled.blueprint;
+  check("人设编译返回草稿", typeof blueprint?.name === "string" && blueprint.name === "林野", `name=${blueprint?.name}`);
+  check("没配模型时用本地规则引擎（不假装调了模型）", blueprint?.engine === "rules" && compiled.usage === null, `engine=${blueprint?.engine}`);
+  check("编译出的是数值内核，不是一句形容词", typeof blueprint?.traits?.memoryD === "number" && blueprint.traits.memoryD !== snapshot.persona?.traits?.memoryD, `d=${blueprint?.traits?.memoryD}`);
+  check("每个改动的参数都带人话解释", Array.isArray(blueprint?.rationale) && blueprint.rationale.length >= 1);
+  const applied = await call("persona.applyBlueprint", { blueprint });
+  check("人格内核能落库并回读", applied?.name === "林野" && applied?.city === "杭州", `${applied?.name}@${applied?.city}`);
+  const reread = await call("persona.get");
+  check("重读人格=刚应用的内核", reread.name === "林野" && reread.immutable.background.length > 0);
+  const updated = await call("persona.update", { patch: { traits: { burstMin: 9, burstMax: 9 } } });
+  check("越界的数值被钳住而不是照单全收", updated.traits.burstMin <= 3 && updated.traits.burstMax <= 3, `burst=${updated.traits.burstMin}-${updated.traits.burstMax}`);
+
+  /* 14. 审计：owner 危险操作留下追加记录（不存消息原文） */
   const audit = await call("audit.list", { limit: 50 });
   check("审计日志记录了 owner 操作", Array.isArray(audit) && audit.length >= 1, `entries=${audit.length}`);
   check("审计里不出现消息正文", Array.isArray(audit) && !audit.some((entry) => JSON.stringify(entry).includes("今天有点累")));

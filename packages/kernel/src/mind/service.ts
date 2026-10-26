@@ -12,13 +12,14 @@ import type {
   DriveState,
   MemoryItem,
   Persona,
+  PersonaBlueprint,
   PresenceState,
   RelationState,
   WorldState,
 } from "@anteros/shared";
-import type { KernelDeps, MemoryPort, MindPort } from "../contracts.js";
+import type { KernelDeps, LlmPort, MemoryPort, MindPort } from "../contracts.js";
 import { buildCandidates, recentUserMemories } from "./actions.js";
-import { DrivesService } from "./drives.js";
+import { compileBlueprint as compilePersonaBlueprint } from "./blueprint.js";import { DrivesService } from "./drives.js";
 import { NarrativeService } from "./narrative.js";
 import { PersonaService } from "./persona.js";
 import { PresenceService } from "./presence.js";
@@ -36,6 +37,7 @@ export class MindService implements MindPort {
   constructor(
     private readonly deps: KernelDeps,
     private readonly memory: MemoryPort,
+    private readonly llm: LlmPort | null = null,
   ) {
     this.persona = new PersonaService(deps);
     this.relation = new RelationService(deps);
@@ -61,6 +63,22 @@ export class MindService implements MindPort {
 
   applyPreset(presetId: string): Persona {
     return this.persona.applyPreset(presetId);
+  }
+
+  /**
+   * 人设文本 → 人格内核草稿（草案 2 参数投影）。
+   * 配了模型就让模型读人设，没配/失败就本地规则引擎；结果一律按区间钳住。
+   */
+  async compileBlueprint(text: string): Promise<{
+    blueprint: PersonaBlueprint;
+    usage: { model: string; inputTokens: number; outputTokens: number } | null;
+  }> {
+    return compilePersonaBlueprint(text, this.persona.get(), this.llm, this.deps.log);
+  }
+
+  /** 把用户确认过（可能微调过）的草稿落库。 */
+  applyBlueprint(blueprint: PersonaBlueprint): Persona {
+    return this.persona.applyBlueprint(blueprint);
   }
 
   /* ───────────────────────────── 关系 ───────────────────────────── */

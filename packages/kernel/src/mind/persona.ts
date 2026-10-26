@@ -8,10 +8,11 @@
  *     （规范 1 §2.5：出生随机一次，之后只极慢塑形）。
  *   - MBTI 只投影成 traits 先验，不进 prompt、不作口头禅（草案 2.7）。
  */
-import type { Persona, PersonaTraits } from "@anteros/shared";
+import type { Persona, PersonaBlueprint, PersonaTraits } from "@anteros/shared";
 import { DEFAULT_TRAITS } from "@anteros/shared";
 import type { Db } from "../db/database.js";
 import type { KernelDeps } from "../contracts.js";
+import { clampTraits } from "./blueprint.js";
 import { mergeTraits, projectMbti, sampleTraits } from "./traits.js";
 
 /** 新建人格的年龄锚点：小满 23 岁（出生日期固定，保证 age 可复现）。 */
@@ -246,9 +247,9 @@ export class PersonaService {
   }
 
   /**
-   * 只允许改 name / city / interests / speechStyle /（traits.mbti 投影）。
-   * 不可变设定（immutable）、traits 数值、birth_ts 一律忽略：
-   * birth_ts 是年龄锚点，改了会让人物的年龄叙事错乱（草案 3.7）。
+   * 允许改：name / city / interests / speechStyle / traits（含数值，按区间钳住）/
+   * immutable（背景、价值观、禁区——用户要能改人设，但安全红线不随人设改变）。
+   * 不改：id / birth_ts（年龄锚点，草案 3.7）。
    */
   update(patch: Partial<Persona>): Persona {
     const current = this.get();
@@ -265,19 +266,85 @@ export class PersonaService {
         : current.speechStyle.habits;
       next.speechStyle = { habits, punctuation, sentenceLength };
     }
+    if (patch.immutable !== undefined) {
+      const values = Array.isArray(patch.immutable.values)
+        ? patch.immutable.values.filter((item): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 10)
+        : current.immutable.values;
+      const taboo = Array.isArray(patch.immutable.taboo)
+        ? patch.immutable.taboo.filter((item): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 10)
+        : current.immutable.taboo;
+      const background =
+        typeof patch.immutable.background === "string" && patch.immutable.background.trim().length > 0
+          ? patch.immutable.background.trim().slice(0, 1200)
+          : current.immutable.background;
+      next.immutable = { background, values, taboo };
+    }
 
-    // MBTI 允许改，但只以投影形式落到 traits（草案 2.7）
-    if (patch.traits !== undefined && "mbti" in patch.traits) {
-      const mbti = patch.traits.mbti;
-      if (mbti === null) {
-        next.traits = { ...next.traits, mbti: null };
-      } else if (typeof mbti === "string" && mbti.length >= 4) {
-        next.traits = mergeTraits(next.traits, { ...mbtiProjection(mbti), mbti });
+    // 数值内核：允许直接改，但一律按草案区间钳住（越界钳住，不静默接受）
+    if (patch.traits !== undefined) {
+      const numeric: Partial<PersonaTraits> = { ...next.traits };
+      for (const key of Object.keys(patch.traits) as Array<keyof PersonaTraits>) {
+        if (key === "mbti") continue;
+        const value = patch.traits[key];
+        if (typeof value === "number" && Number.isFinite(value)) {
+          (numeric as unknown as Record<string, number>)[key] = value;
+        }
+      }
+      const clamped = clampTraits(numeric);
+      // MBTI 仍然只走投影（草案 2.7）
+      if ("mbti" in patch.traits) {
+        const mbti: unknown = (patch.traits as Partial<PersonaTraits>).mbti;
+        next.traits =
+          mbti === null || mbti === undefined
+            ? { ...clamped, mbti: null }
+            : mergeTraits(clamped, { ...mbtiProjection(String(mbti)), mbti: String(mbti) });
+      } else {
+        next.traits = clamped;
       }
     }
 
     this.write(next);
     this.deps.log.debug(`persona updated: ${next.name}@${next.city}`);
+    return next;
+  }
+
+  /**
+   * 把「人设文本编译出来的草稿」落库。用户可能在界面上微调过，所以这里不再解释
+   * 来源文本，只保证写进去的值都在区间内、禁区沿用库里的（草稿不带禁区）。
+   */
+  applyBlueprint(blueprint: PersonaBlueprint): Persona {
+    const current = this.get();
+    const clamped = clampTraits(blueprint.traits);
+    const birthTs =
+      blueprint.ageYears === null || blueprint.ageYears === undefined
+        ? current.birthTs
+        : Date.now() - Math.round(blueprint.ageYears * 365.25 * 24 * 60 * 60 * 1000);
+
+    const next: Persona = {
+      ...current,
+      name: blueprint.name.trim().slice(0, 24) || current.name,
+      city: blueprint.city.trim().slice(0, 24) || current.city,
+      birthTs,
+      traits: { ...clamped, mbti: blueprint.traits.mbti ?? null },
+      interests: blueprint.interests.slice(0, 20),
+      immutable: {
+        background: blueprint.background.trim().slice(0, 1200) || current.immutable.background,
+        values: blueprint.values.slice(0, 10),
+        taboo: current.immutable.taboo,
+      },
+      speechStyle: {
+        habits: blueprint.speechStyle.habits.slice(0, 10),
+        punctuation: PUNCTUATIONS.has(blueprint.speechStyle.punctuation)
+          ? blueprint.speechStyle.punctuation
+          : current.speechStyle.punctuation,
+        sentenceLength: LENGTHS.has(blueprint.speechStyle.sentenceLength)
+          ? blueprint.speechStyle.sentenceLength
+          : current.speechStyle.sentenceLength,
+      },
+    };
+
+    this.write(next);
+    this.deps.log.info(`persona blueprint applied: ${next.name}@${next.city} engine=${blueprint.engine}`);
     return next;
   }
 

@@ -107,17 +107,34 @@ node --input-type=module -e "import {DatabaseSync} from 'node:sqlite'; const db=
 - 日志抽查：`logs/kernel-*.log` 无 `sk-`、无 `Bearer`、无消息正文原样（**已验证**）。
 - 崩溃抽查：不配模型时 App 顶部明示"本地回声（演示模式，不产生云端调用）"，不白屏、不假成功（**已验证**）。
 
+## 10. v0.2.0 增补（人格内核可编辑 / 逐条发送 / 弹窗层级）
+
+- **人格内核由用户输入驱动（已验证）**：管理面板「人格」页签写一段人设 → 点「编译成人格内核」→
+  得到带取值区间的数值内核（`d` / `τ` / `s` / `ρ` / 情绪增益 / 打字延迟与 σ / 气泡条数 / 错字率 /
+  细节敏感 / 温度 / 主动性 / 幽默）与逐项 `why` 依据；未配置模型走本地规则引擎（`engine=rules`，
+  `usage=null`，界面明示"本地规则引擎"徽标），配置模型后由模型读人设产出草稿。
+  越界输入一律钳到边界并在 `clamped` 里写明原因；「应用到人格」才落库，落库前不改当前人格。
+  冒烟断言：草稿姓名/城市/年龄来自原文、引擎标识正确、每项改动带解释、应用后 `persona.get` 回读一致、
+  `burstMin/burstMax=9` 被钳到 3。单测 `mind.blueprint.test.ts` 9 例覆盖规则方向、钳位、模型 JSON 解析与坏输出回退。
+- **逐条发送（已验证）**：输入框底部「逐条发送」开关，状态存 `localStorage`（`anteros.splitSend`，默认关）；
+  开启后按行拆段、逐条 `chat.send`、间隔 400–1200 ms，发送期间输入框禁用、失败即停并把剩余内容留在输入框。
+- **弹窗层级（已验证）**：危险操作二次确认浮层改走 `.modal-mask-top`（`z-index: 95`），
+  不再被下层授权弹窗遮住；`useConfirm` 一处改动覆盖 6 个页签的确认框。
+- **降级提示去噪（已验证）**：内核启动/健康检查会连发多次 `event.health`，客户端把 1.5 s 内的变化
+  合并为一条、内容未变不再弹，并过滤掉"尚未勾选声明"这类第一跑的预期状态。
+- **自检口子**：`ANTEROS_SMOKE_TAB=<页签文本>` 点开指定页签，`ANTEROS_SMOKE_PERSONA_TEXT=<人设>` 自动填入并编译，
+  用于无人值守截图验证；不设这两个变量时行为与之前完全一致。
 ## 2026-10-26 验收记录（本机 Windows 11 / Node 24 / Electron 45）
 
 ```
 M0c 验收：通过（界面内逐项点击另列遗留）
 构建：shared ✅ kernel ✅ client ✅   —— npm.cmd run build 全绿
 类型：npm.cmd run typecheck          —— 0 error（shared/kernel/client 三套 tsconfig）
-单测：npm.cmd test                   —— 14 文件 / 80 用例全绿
-冒烟：npm.cmd run smoke:kernel       —— 31 项全过（真起内核进程 + 命名管道）
+单测：npm.cmd test                   —— 15 文件 / 89 用例全绿（v0.2.0 增补人设编译 9 例）
+冒烟：npm.cmd run smoke:kernel       —— 38 项全过（真起内核进程 + 命名管道）
 边界：npm.cmd run lint               —— 0 violation
 插件：validate-plugins 7/7；package-check 19 通过 0 错误
-安装：NSIS 安装包约 117 MB；win-unpacked 实跑，声明闸 → 聊天 → 管理面板（11 页签）截图留证
+安装：NSIS 安装包约 117 MB；win-unpacked 实跑，声明闸 → 聊天 → 管理面板（11 页签）截图留证（v0.2.0 另有人格内核编译截图）
 逐项：1 ✅  2 🟡 3 🟡 4 ✅  5 ✅  6 ✅  7 ✅  8 ✅
 遗留：2/3 的界面内逐项点击未做（自动化已覆盖崩溃退避与启停残留）；
       真实模型回复未验（本机无 API Key，只验证到降级回声与 token 计费链路）。

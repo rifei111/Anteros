@@ -131,6 +131,49 @@ export interface Persona {
   };
 }
 
+/**
+ * 一条参数的解释：用户写完人设、系统算出内核之后，得能说清"为什么是这个值"。
+ * 没有解释的自动参数没人敢用，也没法改。
+ */
+export interface PersonaRationale {
+  key: string;
+  label: string;
+  value: string;
+  why: string;
+}
+
+/**
+ * 人设文本 → 人格内核的编译产物（草案 2 参数投影、2.7 MBTI 只作投影）。
+ *
+ * 它是"草稿"：用户可以在界面上微调每个数值，再决定要不要落库。
+ * traits 的取值一律钳在草案给的区间里，越界会被记进 clamped 而不是静默截断。
+ */
+export interface PersonaBlueprint {
+  /** 编译来源文本，保存下来便于"这句话是怎么变成这个人"的回看 */
+  sourceText: string;
+  /** rules = 本地规则引擎（没配模型也能用）；llm = 模型推导 */
+  engine: "rules" | "llm";
+  name: string;
+  city: string;
+  ageYears: number | null;
+  interests: string[];
+  background: string;
+  values: string[];
+  /** 口头禅只从用户原话里摘，不生成（草案 4.6） */
+  habits: string[];
+  speechStyle: Persona["speechStyle"];
+  traits: PersonaTraits;
+  rationale: PersonaRationale[];
+  clamped: string[];
+  warnings: string[];
+}
+
+/** persona.compile 的结果：草稿 + 这次编译的模型开销（规则引擎为 null）。 */
+export interface PersonaCompileResult {
+  blueprint: PersonaBlueprint;
+  usage: { model: string; inputTokens: number; outputTokens: number } | null;
+}
+
 /** 关系层（规范 1 §2.4）：intimacy 只由 transition_log 累加，禁止自由漂移。 */
 export interface RelationState {
   stage: RelationStage;
@@ -342,10 +385,13 @@ export interface AuditEntry {
   ts: number;
 }
 
+/** 记账口径：persona = 人设文本编译（一次性开销，不算进"每条消息边际成本"）。 */
+export type CostKind = "reply" | "proactive" | "impulse" | "extract" | "world" | "embedding" | "persona";
+
 export interface CostEntry {
   id: number;
   ts: number;
-  kind: "reply" | "proactive" | "impulse" | "extract" | "world" | "embedding";
+  kind: CostKind;
   model: string;
   inputTokens: number;
   outputTokens: number;

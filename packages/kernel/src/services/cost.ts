@@ -7,7 +7,7 @@ import type { CostEntry, CostSummary } from "@anteros/shared";
 import type { Db } from "../db/database.js";
 import type { SettingsService } from "../settings.js";
 
-export type CostKind = "reply" | "proactive" | "impulse" | "extract" | "world" | "embedding";
+export type CostKind = "reply" | "proactive" | "impulse" | "extract" | "world" | "embedding" | "persona";
 
 interface CostRow {
   id: number;

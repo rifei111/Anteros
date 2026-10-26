@@ -377,10 +377,28 @@ function wireEvents(): () => void {
     }),
   );
 
+  /**
+   * 插件降级提示：内核在启动/健康检查里会连着发几次 event.health，同一条降级会重复很多遍。
+   * 这里做两件事：①「还没勾声明」是第一跑的预期状态，不当告警；②把 1.5 秒内的多次变化
+   * 合并成一条，并且和上次报过的内容相同就不再弹。
+   */
+  let degradeTimer: number | null = null;
+  let degradeShown = "";
+  let degradePending: string[] = [];
   cleanups.push(
     subscribe("event.health", (payload) => {
-      if (payload.degraded.length === 0) return;
-      pushToast("warn", "有插件降级", payload.degraded.map((item) => `${item.pluginId}：${item.reason}`).join("\n"));
+      const real = payload.degraded.filter((item) => !item.reason.includes("同意《用户声明与风险告知》"));
+      if (real.length === 0) return;
+      degradePending = real.slice(0, 3).map((item) => `${item.pluginId}：${item.reason}`);
+      if (degradeTimer !== null) window.clearTimeout(degradeTimer);
+      degradeTimer = window.setTimeout(() => {
+        degradeTimer = null;
+        const text = degradePending.join("\n");
+        if (text.length === 0 || text === degradeShown) return;
+        degradeShown = text;
+        const extra = real.length > 3 ? `\n…另有 ${real.length - 3} 个` : "";
+        pushToast("warn", "有插件降级", text + extra);
+      }, 1_500);
     }),
   );
 

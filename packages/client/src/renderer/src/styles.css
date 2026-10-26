@@ -1345,6 +1345,34 @@ ul {
   cursor: not-allowed;
 }
 
+/* 逐条发送开关：小字说明，不抢输入区的视觉重心。 */
+.composer-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.split-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-2);
+  cursor: pointer;
+  user-select: none;
+}
+
+.split-toggle input {
+  margin: 0;
+  cursor: pointer;
+}
+
+.split-hint {
+  color: var(--muted);
+}
+
 /* ---------- 右键菜单 ---------- */
 
 .ctx-menu {
@@ -1644,6 +1672,11 @@ ul {
   padding: 24px;
 }
 
+/* 二次确认要盖住触发它的模态（同层叠时 DOM 顺序会反压），toast(120) 仍在它上面。 */
+.modal-mask-top {
+  z-index: 95;
+}
+
 .modal {
   width: min(520px, 94vw);
   max-height: 86vh;
@@ -1801,6 +1834,44 @@ ul {
 
 .admin-section-action {
   flex: none;
+}
+
+/* 人格编译：engine 标记 / 钳位提示 / 数值参数网格。 */
+.compile-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 2px 0 10px;
+}
+
+.blueprint-note {
+  margin: 6px 0 12px;
+  padding: 8px 10px;
+  border: 1px solid #f0dca8;
+  border-radius: 4px;
+  background: var(--warn-soft);
+  color: #7a5a00;
+  font-size: 12px;
+}
+
+.blueprint-note ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.blueprint-note-title {
+  font-weight: 600;
+}
+
+.param-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 10px 12px;
+}
+
+.param-grid .field {
+  margin-bottom: 0;
 }
 
 /* ---------- 面板内组件 ---------- */
