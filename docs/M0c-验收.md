@@ -95,8 +95,15 @@ node --input-type=module -e "import {DatabaseSync} from 'node:sqlite'; const db=
 
 - `node scripts/validate-plugins.mjs`：7/7 通过（**已验证**）。
 - `node scripts/package-check.mjs --repo-only`：0 错误（**已验证**）；带安装包全量检查 19 通过 / 0 警告 / 0 错误。
-- 安装包：`release/Anteros-Setup-0.1.0-x64.exe`（117 MB），`package-check` 已确认包内含
+- 安装包：`release/Anteros-Setup-0.1.0-x64.exe`（约 117 MB），`package-check` 已确认包内含
   `resources/kernel/kernel.mjs` 与 `resources/plugins/*/plugin.json`；`win-unpacked\Anteros.exe` 实跑通过。
+- 插件随内核启动（**已验证**，2026-10-26 修复）：内核 `ready` 之后 `App.start()` 拉起插件宿主与通道；
+  `core.dashboard` / `core.memory-extract` / `core.tray-notify` / `core.world-info` 四个默认启用插件
+  实测为 `running`；`core.media` 因缺 `media.api_key` 为 `blocked`（不假成功）；
+  `channel.wechat-replica` 与 `core.llm-router` 默认 `disabled`。首启未过声明闸时插件保留
+  `enabled=1` 仅置 `blocked`，`consent.accept` 后自动补启动。
+- 健康语义（**已验证**）：`system.health().ok` 只统计 `degraded`/`crashed`，故意关闭的高危通道与
+  缺密钥的可选插件不再把整体健康拖成 false，但仍会出现在 `degraded` 清单里供面板提示。
 - 日志抽查：`logs/kernel-*.log` 无 `sk-`、无 `Bearer`、无消息正文原样（**已验证**）。
 - 崩溃抽查：不配模型时 App 顶部明示"本地回声（演示模式，不产生云端调用）"，不白屏、不假成功（**已验证**）。
 
@@ -110,10 +117,17 @@ M0c 验收：通过（界面内逐项点击另列遗留）
 冒烟：npm.cmd run smoke:kernel       —— 31 项全过（真起内核进程 + 命名管道）
 边界：npm.cmd run lint               —— 0 violation
 插件：validate-plugins 7/7；package-check 19 通过 0 错误
-安装：NSIS 安装包 117 MB；win-unpacked 实跑，声明闸 → 聊天 → 管理面板（11 页签）截图留证
+安装：NSIS 安装包约 117 MB；win-unpacked 实跑，声明闸 → 聊天 → 管理面板（11 页签）截图留证
 逐项：1 ✅  2 🟡 3 🟡 4 ✅  5 ✅  6 ✅  7 ✅  8 ✅
 遗留：2/3 的界面内逐项点击未做（自动化已覆盖崩溃退避与启停残留）；
-      2 的日志里暂未看到插件"已启动"行，说明默认启用插件是按需拉起——点验时注意这一点；
       真实模型回复未验（本机无 API Key，只验证到降级回声与 token 计费链路）。
+补充：插件自动拉起与健康语义已于同日修复并实测（见上方第 9 节）。
 ```
+
+## 代码同步状态
+
+- 远端：`https://github.com/rifei111/Anteros`（public，`main`）。
+- 本地与远端在同一提交上，按"初始化骨架 → 内核闭环 → 客户端三视图 → 冒烟 31 项 → 插件启动与健康修复"五次提交推进。
+- 2026-10-26 夜间 `github.com:443` 一度不可达（`api.github.com` 正常），本次提交经 GitHub REST 的 Git Data API
+  写入（blob → tree → commit → 更新 ref），因此提交哈希与本地对象一致，工作树干净。
 

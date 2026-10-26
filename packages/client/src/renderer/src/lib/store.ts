@@ -173,6 +173,13 @@ export function useAppState(): AppState {
 let toastSeq = 0;
 
 export function pushToast(level: ToastLevel, title: string, detail: string | null = null): void {
+  // 同样的提示已经在栈里就不再叠一条：健康巡检会反复上报同一批降级插件，
+  // 叠成四条只会把界面盖住，对用户没有新信息。
+  const duplicate = getState().toasts.some(
+    (toast) => toast.level === level && toast.title === title && (toast.detail ?? null) === detail,
+  );
+  if (duplicate) return;
+
   const id = ++toastSeq;
   setState((previous) => ({ toasts: [...previous.toasts, { id, level, title, detail }] }));
   const ttl = level === "error" ? 9_000 : level === "warn" ? 6_000 : 4_000;
