@@ -5,17 +5,40 @@
  * 1. 单实例锁与窗口生命周期（默认 1180×780，最小 960×640，无原生菜单栏）
  * 2. 启动 / 守护内核子进程（`KernelClient`），内核事件转发给渲染进程
  * 3. 渲染进程 → 内核的 IPC 桥（所有内核调用都收在这里，页面拿不到管道名与 token）
+ *
+ * 数据目录：`app.getPath("userData")`，即 %APPDATA%\\Anteros —— 人格与记忆只存在这台电脑上。
+ * 插件目录：开发期用仓库内 plugins/，打包后用 resources/plugins（electron-builder extraResources）。
  */
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
-import { join } from "node:path";
-import { DATA_DIR_NAME, IPC_CHANNEL, type IpcResult } from "../common/protocol";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { IPC_CHANNEL, type IpcResult } from "../common/protocol";
 import { KernelCallError, KernelClient } from "./kernel-client";
 
 const WINDOW_WIDTH = 1180;
 const WINDOW_HEIGHT = 780;
 const MIN_WINDOW_WIDTH = 960;
 const MIN_WINDOW_HEIGHT = 640;
+
+/**
+ * 自检（smoke）模式：只有显式设置环境变量才生效，默认行为完全不变。
+ * - `ANTEROS_SMOKE_SCREENSHOT=<绝对路径.png>`：窗口就绪 5 秒后截图写盘并退出。
+ * - `ANTEROS_SMOKE_SKIP_CONSENT=1`：仅标记"这是自检运行，声明闸未过也照常截图"。
+ *   它不会勾选、不会绕过声明闸——首启时截到的就是声明闸本身。
+ */
+const SMOKE_SCREENSHOT_PATH =
+  typeof process.env.ANTEROS_SMOKE_SCREENSHOT === "string" && process.env.ANTEROS_SMOKE_SCREENSHOT.length > 0
+    ? process.env.ANTEROS_SMOKE_SCREENSHOT
+    : null;
+const SMOKE_SKIP_CONSENT = process.env.ANTEROS_SMOKE_SKIP_CONSENT === "1";
+const SMOKE_DELAY_MS = 5_000;
+
+/** 必须在 whenReady 之前设置，userData 才会是 %APPDATA%\\Anteros。 */
+app.setName("Anteros");
+if (process.platform === "win32") {
+  app.setAppUserModelId("com.anteros.app");
+}
 
 let mainWindow: BrowserWindow | null = null;
 let kernel: KernelClient | null = null;
@@ -124,6 +147,7 @@ function createWindow(): BrowserWindow {
 
   window.once("ready-to-show", () => {
     window.show();
+    scheduleSmokeScreenshot(window);
   });
 
   window.webContents.setWindowOpenHandler(({ url }) => {
@@ -132,7 +156,9 @@ function createWindow(): BrowserWindow {
   });
 
   window.webContents.on("will-navigate", (event, url) => {
-    const isDevServer = typeof process.env.ELECTRON_RENDERER_URL === "string" && url.startsWith(process.env.ELECTRON_RENDERER_URL);
+    const isDevServer =
+      typeof process.env.ELECTRON_RENDERER_URL === "string" &&
+      url.startsWith(process.env.ELECTRON_RENDERER_URL);
     if (!isDevServer && !url.startsWith("file://")) {
       event.preventDefault();
     }
@@ -150,6 +176,29 @@ function createWindow(): BrowserWindow {
   }
 
   return window;
+}
+
+function scheduleSmokeScreenshot(window: BrowserWindow): void {
+  const targetPath = SMOKE_SCREENSHOT_PATH;
+  if (!targetPath) return;
+  if (SMOKE_SKIP_CONSENT) {
+    console.warn("[anteros] 自检模式：声明闸未过也照常截图（不勾选，也不绕过声明闸本身）");
+  }
+  const timer = setTimeout(() => {
+    void (async () => {
+      try {
+        const image = await window.webContents.capturePage();
+        await mkdir(dirname(targetPath), { recursive: true });
+        await writeFile(targetPath, image.toPNG());
+        console.warn(`[anteros] 自检截图已写入 ${targetPath}`);
+      } catch (error) {
+        console.error("[anteros] 自检截图失败:", error);
+      } finally {
+        quitGracefully(0);
+      }
+    })();
+  }, SMOKE_DELAY_MS);
+  timer.unref();
 }
 
 function quitGracefully(exitCode: number): void {
@@ -183,8 +232,14 @@ if (!gotLock) {
     // Windows 客户端不提供原生菜单栏（自绘在页面内）
     Menu.setApplicationMenu(null);
 
-    const dataDir = join(app.getPath("userData"), DATA_DIR_NAME);
-    const client = new KernelClient({ dataDir });
+    // %APPDATA%\Anteros —— 与内核 ANTEROS_DATA_DIR 同一个目录
+    const dataDir = app.getPath("userData");
+    // 开发期：仓库根 plugins/；打包后：resources/plugins
+    const pluginsDir = app.isPackaged
+      ? join(process.resourcesPath, "plugins")
+      : join(__dirname, "../../../../plugins");
+
+    const client = new KernelClient({ dataDir, pluginsDir });
     kernel = client;
     client.onEvent((method, params) => {
       broadcast(method, params);

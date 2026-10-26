@@ -10,7 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { AnterosError, ERROR_CODES } from "@anteros/shared";
 import { decryptString, encryptString } from "../util/crypto.js";
-import type { SourceLogger } from "../util/log.js";
+import type { LogSink } from "../util/log.js";
 
 const SAFE_NAME = /^[A-Za-z0-9._-]{1,64}$/;
 
@@ -20,7 +20,7 @@ function assertSafe(kind: "pluginId" | "name", value: string): void {
   }
 }
 
-/** 环境变量名：secrets 里写 wechat.token → 插件进程读到 ANTEROS_SECRET_WECHAT_TOKEN。 */
+/** 环境变量名：secrets 里写 provider.token → 插件进程读到 ANTEROS_SECRET_PROVIDER_TOKEN。 */
 export function secretEnvName(name: string): string {
   return `ANTEROS_SECRET_${name.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}`;
 }
@@ -28,14 +28,14 @@ export function secretEnvName(name: string): string {
 export class SecretStore {
   private readonly root: string;
   private readonly key: Buffer | null;
-  private readonly log: SourceLogger | null;
+  private readonly log: LogSink | null;
   private readonly cache = new Map<string, string>();
 
   /**
    * @param dataDir 用户数据目录（密钥文件在 dataDir/secrets/ 下）
    * @param masterKey 32 字节密钥材料；null 表示本会话无密钥（只读，写入直接拒绝）
    */
-  constructor(dataDir: string, options: { masterKey?: Buffer | null; log?: SourceLogger } = {}) {
+  constructor(dataDir: string, options: { masterKey?: Buffer | null; log?: LogSink } = {}) {
     this.root = path.join(dataDir, "secrets");
     this.key = options.masterKey ?? null;
     this.log = options.log ?? null;

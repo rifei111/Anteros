@@ -6,7 +6,7 @@
  */
 
 import type { KernelEventName, KernelEvents, KernelMethod, KernelParams, KernelResult } from "@anteros/shared";
-import type { ExtendedClientBridge } from "../../common/protocol";
+import type { ExtendedClientBridge } from "../../../common/protocol";
 
 export interface ConnectionInfo {
   connected: boolean;

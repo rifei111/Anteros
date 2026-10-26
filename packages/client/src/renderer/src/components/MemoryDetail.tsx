@@ -3,7 +3,8 @@ import type { MemoryItem } from "@anteros/shared";
 import { humanizeError } from "../lib/errors";
 import { formatDateTime, formatPercent } from "../lib/format";
 import { invoke } from "../lib/kernel";
-import { focusMemory, pushToast } from "../lib/store";
+import { focusMemory } from "../lib/app";
+import { pushToast } from "../lib/store";
 import { IMPORTANCE_LABEL, KIND_LABEL, labelOf } from "../lib/labels";
 import { CloseIcon, TrashIcon } from "./Icons";
 

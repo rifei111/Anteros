@@ -11,7 +11,7 @@ import type {
   MemorySearchResult,
   ParsedPluginManifest,
 } from "@anteros/shared";
-import type { SourceLogger } from "../util/log.js";
+import type { LogSink } from "../util/log.js";
 
 /** 内核 → 客户端事件推送（event.plugin / event.health / event.channels / event.notify / event.log...）。 */
 export type EmitFn = (method: string, params: unknown) => void;
@@ -145,7 +145,7 @@ export interface HostDepsBundle {
   grants?: import("./grants.js").GrantStore;
   ports: HostPorts;
   emit: EmitFn;
-  log: SourceLogger;
+  log: LogSink;
   /** 启用闸策略（缺省：声明闸 + 密钥齐全 + 写能力需租约授权）。 */
   canEnable?: CanEnableFn;
   /** owner 二次确认；缺省时 high 风险启用若带 token 则直接信任（由上层 IPC 校验）。 */

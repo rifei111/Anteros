@@ -5,7 +5,7 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomHex } from "../util/crypto.js";
-import type { SourceLogger } from "../util/log.js";
+import type { LogSink } from "../util/log.js";
 
 const DEFAULT_MAX_BUFFER_BYTES = 1024 * 1024; // 每路 1MB
 
@@ -36,7 +36,9 @@ export interface PluginProcessOptions {
   args?: readonly string[];
   cwd: string;
   env: NodeJS.ProcessEnv;
-  log: SourceLogger;
+  log: LogSink;
+  /** 宿主生成的握手 token（缺省时自动生成）。 */
+  token?: string;
   /** 已知密钥值（env 注入的），出现即视为泄漏。 */
   knownSecrets?: readonly string[];
   maxBufferBytes?: number;
@@ -96,7 +98,7 @@ export class PluginProcess {
 
   constructor(private readonly options: PluginProcessOptions) {
     this.pluginId = options.pluginId;
-    this.token = randomHex(16);
+    this.token = options.token ?? randomHex(16);
     const max = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
     this.stdoutBuf = new RingTextBuffer(max);
     this.stderrBuf = new RingTextBuffer(max);

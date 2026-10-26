@@ -179,11 +179,12 @@ function seedAgent(db: Db, userId: number, personaId: number, now: number): numb
 }
 
 function seedOwner(db: Db, userId: number, now: number): void {
-  const wechatId = process.env.ANTEROS_OWNER_WECHAT_ID ?? "";
-  if (!wechatId) return;
+  // 构建期绑定（草案 2.9）：这个外部账号 ID 只作为 owner 判定口径，内核不按通道名分支。
+  const ownerExternalId = process.env.ANTEROS_OWNER_WECHAT_ID ?? "";
+  if (!ownerExternalId) return;
   db.run(
     "INSERT INTO owners(user_id, wechat_id, build_id, bound_ts) VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET wechat_id = excluded.wechat_id",
-    [userId, wechatId, process.env.ANTEROS_BUILD_ID ?? "local-dev", now],
+    [userId, ownerExternalId, process.env.ANTEROS_BUILD_ID ?? "local-dev", now],
   );
 }
 

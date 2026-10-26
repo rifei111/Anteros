@@ -29,6 +29,7 @@ export type Phase = "connecting" | "consent" | "onboarding" | "ready";
 
 export type AdminTab =
   | "owner"
+  | "persona"
   | "plugins"
   | "channels"
   | "memory"

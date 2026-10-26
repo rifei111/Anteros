@@ -183,6 +183,10 @@ export class RpcPeer {
         this.handlers.onNotification?.(envelope.method, envelope.params);
         return;
       }
+      if (typeof id !== "string" && typeof id !== "number") {
+        this.protocolViolation("请求帧 id 必须是字符串或数字，断开连接");
+        return;
+      }
       void this.handleRequest(id, envelope.method, envelope.params, {
         ...(envelope.auth === undefined ? {} : { auth: envelope.auth }),
         ...(envelope.token === undefined ? {} : { token: envelope.token }),

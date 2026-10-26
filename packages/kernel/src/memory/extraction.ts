@@ -9,7 +9,10 @@
  * 引入分词只会换来不可解释的漏抽。
  */
 import type { LlmPort, MemoryCandidate } from "../contracts.js";
-import type { Importance, MemoryKind } from "@anteros/shared";
+import type { Importance } from "@anteros/shared";
+
+/** 抽取管线能写的 kind：persona 是种子人格专属（规范 1 §1，禁止抽取写入）。 */
+type CandidateKind = MemoryCandidate["kind"];
 
 export interface RuleFact {
   slotKey: string;
@@ -260,7 +263,7 @@ interface LlmExtractionJson {
   open_loops?: unknown[];
 }
 
-const KINDS: ReadonlySet<string> = new Set<MemoryKind>(["episodic", "semantic", "open_loop"]);
+const KINDS: ReadonlySet<string> = new Set<CandidateKind>(["episodic", "semantic", "open_loop"]);
 const IMPORTANCES: ReadonlySet<string> = new Set<Importance>(["detail", "important", "redline"]);
 
 export function parseLlmExtraction(raw: string, sourceText: string): RuleExtraction {
@@ -282,7 +285,8 @@ export function parseLlmExtraction(raw: string, sourceText: string): RuleExtract
     const text = typeof memory.text === "string" ? memory.text.trim() : "";
     // 硬约束：模型只能复制原文，不能概括（草案 1.7）。不在原文里的直接丢弃。
     if (text.length === 0 || !sourceText.includes(text)) continue;
-    const kind = typeof memory.kind === "string" && KINDS.has(memory.kind) ? (memory.kind as MemoryKind) : "episodic";
+    const kind: CandidateKind =
+      typeof memory.kind === "string" && KINDS.has(memory.kind) ? (memory.kind as CandidateKind) : "episodic";
     const importance =
       typeof memory.importance === "string" && IMPORTANCES.has(memory.importance)
         ? (memory.importance as Importance)

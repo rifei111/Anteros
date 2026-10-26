@@ -14,7 +14,7 @@ import {
   type PluginRisk,
 } from "@anteros/shared";
 import type { Db } from "../db/database.js";
-import type { SourceLogger } from "../util/log.js";
+import type { LogSink } from "../util/log.js";
 import type { InvalidPluginInfo, PluginDirInfo } from "./types.js";
 
 interface PluginDbRow {
@@ -39,7 +39,7 @@ export class PluginRegistry {
 
   constructor(
     private readonly db: Db,
-    private readonly log: SourceLogger,
+    private readonly log: LogSink,
     private readonly options: { pluginsDir: string; production?: boolean },
   ) {}
 
@@ -140,10 +140,11 @@ export class PluginRegistry {
       production: this.options.production,
     });
     if (!validation.ok) {
+      const rawId = rawRecord(raw)?.id;
       return {
         ok: false,
         invalid: {
-          id: rawRecord(raw)?.id ?? dirName,
+          id: typeof rawId === "string" && rawId.length > 0 ? rawId : dirName,
           dir,
           issues: sanitizeIssues(validation.errors),
         },

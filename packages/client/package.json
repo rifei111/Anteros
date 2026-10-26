@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Anteros Windows 主客户端（Electron）",
-  "main": "./out/main/index.js",
+  "description": "Anteros Windows 主客户端（Electron）：聊天界面 + 声明闸 + 管理面板。",
+  "main": "./out/main/index.cjs",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",

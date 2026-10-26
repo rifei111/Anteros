@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Windows · Node ${{ matrix.node }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    env:
+      CI: "1"
+      # 不把 npm 的 funding/audit 网络请求拖进构建
+      NPM_CONFIG_FUND: "false"
+      NPM_CONFIG_AUDIT: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        # 有 lockfile 用 ci（可复现）；没有就退回 install（首次初始化仓库时）
+        shell: pwsh
+        run: |
+          if (Test-Path package-lock.json) {
+            npm.cmd ci
+          } else {
+            npm.cmd install
+          }
+
+      - name: Ensure Electron binary (npm postinstall may be skipped)
+        shell: pwsh
+        run: |
+          if (Test-Path node_modules/electron/install.js) {
+            Push-Location node_modules/electron
+            try {
+              node install.js
+            } finally {
+              Pop-Location
+            }
+          } else {
+            Write-Warning "未找到 node_modules/electron/install.js，跳过 Electron 二进制安装"
+          }
+
+      - name: Build shared
+        run: npm.cmd run build:shared
+
+      - name: Build kernel
+        run: npm.cmd run build:kernel
+
+      - name: Check boundaries (业务代码不得出现具体通道名)
+        run: node scripts/check-boundaries.mjs
+
+      - name: Validate plugin manifests
+        run: node scripts/validate-plugins.mjs
+
+      - name: Test
+        run: npm.cmd run test
+
+      - name: Build client
+        run: npm.cmd run build:client
+
+      - name: Package check (repo artifacts only)
+        # 安装包由 release 流程构建，这里只验证 out/、kernel.mjs、插件 manifest 与 extraResources 源路径
+        run: node scripts/package-check.mjs --repo-only

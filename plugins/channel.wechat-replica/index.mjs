@@ -32,7 +32,7 @@ const BLOCKED_HINT =
   "本插件 v0.1 是空实现（blocked）。启用需要声明闸 + 体检 + 租约；未实现前请在插件页保持禁用。";
 
 function blocked(code, action) {
-  return fail("EBLOCKED", `${action}不可用：${BLOCKED_MESSAGE}`, { hint: BLOCKED_HINT, detail: `拒绝的动作：${action}` });
+  return fail("EBLOCKED", `${action} 不可用：${BLOCKED_MESSAGE}`, { hint: BLOCKED_HINT, detail: `拒绝的动作：${action}` });
 }
 
 createPlugin({

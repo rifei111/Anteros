@@ -1,14 +1,22 @@
-// CI gate from 设计草案 14.14.3 / 附录 A8:
-// business code must never mention a specific channel by name ("wechat" / "微信").
-// Channel-specific code lives only in plugins/channel.* and packages/client (UI labels
-// driven by channel metadata). This script fails the build when the invariant breaks.
+// CI gate from 设计草案 14.14.3 / 附录 A8：
+// 业务代码不得按"通道名"分支——通道差异只能通过 capabilities 读取
+// （typing_is_real / can_recall / read_can_backfill / host_occupancy_ms）。
+//
+// 例外只有两类，且都是规范/草案本身规定的字面量，不含任何分支逻辑：
+// 1) 《工程规范 1》owners 表的 wechat_id 列与环境变量 OWNER_WECHAT_ID（owner 绑定口径）；
+// 2) 《设计草案 14.14.5》声明闸文案——法务口径必须点名"外部通道"是什么，故 shared/consent.ts 放行。
+//
+// 任何其它出现（含注释里的分支说明）都视为违规：需要通道差异时去读 capabilities。
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 
 const root = process.cwd();
 const scopes = ["packages/kernel/src", "packages/shared/src"];
 const banned = [/wechat/i, /微信/];
-const allow = [/[\\/]channel[\\/]/, /plugin-manifest/];
+/** 整文件放行：声明闸文案（版本化法务文本，必须点名外部通道） */
+const allowFiles = [/[\\/]channel[\\/]/, /plugin-manifest/, /packages[\\/]shared[\\/]src[\\/]consent\.ts$/];
+/** 行级放行：规范 1 owners 表列名与草案 2.9 的构建期环境变量 */
+const allowLines = [/\bwechat_id\b/i, /OWNER_WECHAT_ID/, /\bownerWechatConfigured\b/];
 
 let violations = 0;
 async function walk(dir) {
@@ -26,13 +34,14 @@ async function walk(dir) {
     }
     if (!/\.(ts|js|mjs)$/.test(entry.name)) continue;
     const rel = relative(root, full);
-    if (allow.some((re) => re.test(rel))) continue;
+    if (allowFiles.some((re) => re.test(rel))) continue;
     const text = await readFile(full, "utf8");
     text.split(/\r?\n/).forEach((line, i) => {
-      if (banned.some((re) => re.test(line))) {
-        violations += 1;
-        console.error(`${rel}:${i + 1}: 业务代码不得出现通道名 -> ${line.trim()}`);
-      }
+      const hit = banned.some((re) => re.test(line));
+      if (!hit) return;
+      if (allowLines.some((re) => re.test(line))) return;
+      violations += 1;
+      console.error(`${rel}:${i + 1}: 业务代码不得出现通道名 -> ${line.trim()}`);
     });
   }
 }
@@ -42,4 +51,4 @@ if (violations > 0) {
   console.error(`[check-boundaries] ${violations} violation(s)`);
   process.exit(1);
 }
-console.log("[check-boundaries] ok");
+console.log("[check-boundaries] ok：业务代码里没有按通道名分支的痕迹");
