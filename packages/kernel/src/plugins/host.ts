@@ -425,7 +425,10 @@ export class PluginHost implements PluginHostPort {
       consent: await this.ports.consent.check(),
     });
     if (!verdict.ok) {
-      this.update(pluginId, { status: "blocked", enabled: 0, last_error: verdict.reason, health: null });
+      // 声明闸没过只是"还没到能启用的时机"，不是用户把它关了：
+      // 保留 enabled=1，等 consent.accept 之后由内核再拉一次（避免首启把默认插件永久停掉）。
+      const keepEnabled = verdict.code === ERROR_CODES.ECONSENT ? 1 : 0;
+      this.update(pluginId, { status: "blocked", enabled: keepEnabled, last_error: verdict.reason, health: null });
       this.event(pluginId, "warn", `启用被拒：${verdict.reason}`);
       this.emitPlugin(pluginId);
       this.emitHealth();

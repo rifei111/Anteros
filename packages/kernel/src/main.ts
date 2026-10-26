@@ -48,6 +48,9 @@ async function main(): Promise<void> {
   process.stdout.write(JSON.stringify(ready) + "\n");
   runtime.logger.child("main").info(`kernel ready (pid ${process.pid})`);
 
+  // 插件宿主与通道轮询在 ready 之后启动：客户端先有界面，插件慢慢起来（失败只降级）。
+  void app.start();
+
   let closing = false;
   const shutdown = async (reason: string): Promise<void> => {
     if (closing) return;

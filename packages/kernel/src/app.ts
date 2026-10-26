@@ -120,6 +120,37 @@ export class App {
     (this.plugins as unknown as { attachEvents?: (handler: Emitter) => void }).attachEvents?.(emit);
   }
 
+  /**
+   * 启动插件宿主与通道轮询（草案 14.14.2：插件可以死，内核不能死）。
+   * 不阻塞 ready：插件起不来只影响对应能力，App 内对话照常。
+   */
+  async start(): Promise<void> {
+    try {
+      await this.plugins.start();
+      this.deps.log.info?.(`plugin host started: ${this.plugins.list().filter((item) => item.status === "running").length} running`);
+    } catch (error) {
+      this.deps.log.warn?.(`plugin host start failed: ${(error as Error).message}`);
+    }
+    try {
+      this.channels.start();
+    } catch (error) {
+      this.deps.log.warn?.(`channel poller start failed: ${(error as Error).message}`);
+    }
+  }
+
+  /** 用户刚过声明闸：把 blocked 且仍标记为启用的插件再拉一次（幂等，失败只降级）。 */
+  async resumePluginsAfterConsent(): Promise<void> {
+    for (const info of this.plugins.list()) {
+      if (!info.enabled || info.status !== "blocked") continue;
+      try {
+        await this.plugins.enable(info.id);
+        this.deps.log.info?.(`plugin enabled after consent: ${info.id}`);
+      } catch (error) {
+        this.deps.log.warn?.(`plugin still blocked after consent: ${info.id} — ${(error as Error).message}`);
+      }
+    }
+  }
+
   /* --------------------------------------------------------------- */
   /* 路由                                                             */
   /* --------------------------------------------------------------- */
@@ -231,6 +262,8 @@ export class App {
         });
         this.runtime.audit.log("consent.accept", { actorRole: "owner", after: { docVersion: status.docVersion } });
         this.emit("event.consent", status);
+        // 声明闸过了，把首启时因"还没同意"而卡在 blocked 的默认插件补起来。
+        void this.resumePluginsAfterConsent();
         return status;
       }
       case "consent.revoke": {

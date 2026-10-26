@@ -62,6 +62,8 @@ export class SystemService {
     const infos = this.plugins.list();
     const channels = this.channels.list();
 
+    // degraded 是"要用户处理"的清单：blocked（缺密钥/缺声明）也算，方便面板提示；
+    // ok 只看"内核是否被拖坏"——blocked 属于可选能力的降级，不算不健康。
     const degraded = infos
       .filter((info) => info.status === "degraded" || info.status === "blocked" || info.status === "crashed")
       .map((info) => ({
@@ -71,10 +73,11 @@ export class SystemService {
             ? info.lastError
             : `插件状态为 ${info.status}`,
       }));
+    const broken = infos.filter((info) => info.status === "degraded" || info.status === "crashed");
 
     const now = Date.now();
     return {
-      ok: degraded.length === 0,
+      ok: broken.length === 0,
       kernelVersion: KERNEL_VERSION,
       kernelApi: KERNEL_API_VERSION,
       startedTs: this.startedTs,
