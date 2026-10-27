@@ -392,6 +392,19 @@ export class App {
         this.runtime.permissions.assertOwner("重启插件");
         return this.plugins.restart(String(p.id));
 
+      /* 插件运行环境：下载 / 校验 / 增量升级 / 卸载（v0.5） */
+      case "plugins.runtime.status":
+        this.runtime.permissions.assertOwner("读取插件运行环境");
+        return this.plugins.runtimeStatus(String(p.id));
+      case "plugins.runtime.check":
+        return this.plugins.runtimeCheck(String(p.id));
+      case "plugins.runtime.install":
+        return this.plugins.runtimeInstall(String(p.id));
+      case "plugins.runtime.uninstall":
+        return this.plugins.runtimeUninstall(String(p.id));
+      case "plugins.runtime.feed":
+        return this.plugins.runtimeFeed(typeof p.url === "string" ? p.url : undefined);
+
       /* ---------------- 通道 ---------------- */
       case "channels.list":
         return this.channels.list();

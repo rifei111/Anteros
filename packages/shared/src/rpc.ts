@@ -32,6 +32,7 @@ import type {
   PersonaBlueprint,
   PersonaCompileResult,
   PluginInfo,
+  PluginRuntimeStatus,
   PluginStatus,
   RelationState,
   SystemHealth,
@@ -154,6 +155,14 @@ export interface KernelApi {
   "plugins.secret.put": MethodSpec<{ id: string; name: string; value: string }, PluginInfo>;
   "plugins.secret.delete": MethodSpec<{ id: string; name: string }, PluginInfo>;
   "plugins.restart": MethodSpec<{ id: string }, PluginInfo>;
+  /** 插件运行环境（v0.1 是"用户点下载、内核去装"的通道适配器环境）。 */
+  "plugins.runtime.status": MethodSpec<{ id: string }, PluginRuntimeStatus>;
+  "plugins.runtime.check": MethodSpec<{ id: string }, PluginRuntimeStatus>;
+  /** 下载并安装；已装旧版时装上新版（能按文件增量就只下变了的文件）。 */
+  "plugins.runtime.install": MethodSpec<{ id: string }, PluginRuntimeStatus>;
+  "plugins.runtime.uninstall": MethodSpec<{ id: string }, PluginRuntimeStatus>;
+  /** 更新源：不传 url 就是读，传了就写（只接受 https / file，写盘前先校验）。 */
+  "plugins.runtime.feed": MethodSpec<{ url?: string }, { url: string }>;
 
   "channels.list": MethodSpec<Record<string, never>, ChannelInfo[]>;
   /** 一键停用：停掉所有通道并还原宿主状态（草案 14.6 ⑦）。 */
@@ -349,6 +358,8 @@ export interface KernelEvents {
   "event.drives": DriveState;
   "event.relation": RelationState;
   "event.plugin": PluginInfo;
+  /** 插件运行环境的下载/安装/更新进度（界面拿它画进度条）。 */
+  "event.runtime": PluginRuntimeStatus;
   "event.channels": ChannelInfo[];
   "event.consent": ConsentStatus;
   "event.cost": CostSummary;

@@ -18,6 +18,7 @@ import type {
   Persona,
   PersonaPreset,
   PluginInfo,
+  PluginRuntimeStatus,
   ChannelInfo,
   RelationState,
   SystemHealth,
@@ -91,6 +92,8 @@ export interface AppState {
   health: SystemHealth | null;
   cost: CostSummary | null;
   plugins: PluginInfo[];
+  /** 插件运行环境状态：key 是 pluginId（`event.runtime` 与 `plugins.runtime.*` 都写这里） */
+  pluginRuntime: Record<string, PluginRuntimeStatus>;
   channels: ChannelInfo[];
   messages: ChatMessage[];
   hasMoreHistory: boolean;
@@ -129,6 +132,7 @@ const initialState: AppState = {
   health: null,
   cost: null,
   plugins: [],
+  pluginRuntime: {},
   channels: [],
   messages: [],
   hasMoreHistory: false,
@@ -168,6 +172,31 @@ export function subscribe(listener: () => void): () => void {
 
 export function useAppState(): AppState {
   return useSyncExternalStore(subscribe, getState, getState);
+}
+
+/* ------------------------------------------------------------------ */
+/* 插件运行环境                                                        */
+/* ------------------------------------------------------------------ */
+
+/** 写入一条运行环境状态：`event.runtime` 推送与 RPC 返回值共走这一条路。 */
+export function applyPluginRuntime(status: PluginRuntimeStatus): void {
+  setState((previous) => ({
+    pluginRuntime: { ...previous.pluginRuntime, [status.pluginId]: status },
+  }));
+}
+
+/**
+ * 更新源是全局配置（`plugins.runtime.feed` 不带插件 id）：保存成功后把所有已缓存的
+ * 状态一起改掉，否则同一份更新源在两个插件卡片里会显示成两个地址。
+ */
+export function setRuntimeFeedUrl(url: string): void {
+  setState((previous) => {
+    const next: Record<string, PluginRuntimeStatus> = {};
+    for (const [pluginId, status] of Object.entries(previous.pluginRuntime)) {
+      next[pluginId] = { ...status, feedUrl: url };
+    }
+    return { pluginRuntime: next };
+  });
 }
 
 /* ------------------------------------------------------------------ */

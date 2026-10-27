@@ -7,7 +7,7 @@
 import type { ChatMessage, KernelEvents, MemoryItem } from "@anteros/shared";
 import { humanizeError } from "./errors";
 import { invoke, newEventId, pollConnection, subscribe, appInfo, quitApp } from "./kernel";
-import { appendLog, getState, pushToast, setState, type AdminTab } from "./store";
+import { appendLog, applyPluginRuntime, getState, pushToast, setState, type AdminTab } from "./store";
 import { truncate } from "./format";
 
 const ONBOARDED_KEY = "anteros.onboarded.v1";
@@ -335,6 +335,14 @@ function wireEvents(): () => void {
           : [...previous.plugins, payload];
         return { plugins };
       });
+    }),
+  );
+
+  // 运行环境（下载/校验/解包/切换）是内核侧的长任务：进度与结果都靠这条事件推进，
+  // 面板只读 store，不再自己轮询。
+  cleanups.push(
+    subscribe("event.runtime", (payload) => {
+      applyPluginRuntime(payload);
     }),
   );
 

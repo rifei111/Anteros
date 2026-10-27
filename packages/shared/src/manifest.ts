@@ -64,6 +64,8 @@ export const pluginManifestSchema = z.object({
   risk_level: z.enum(RISK_VALUES),
   config_schema: z.record(z.string(), z.unknown()).optional(),
   secrets: z.array(z.string().min(1)).optional(),
+  /** 声明这个插件需要一份外部运行环境（由用户在内核里点下载安装，v0.5+）。 */
+  runtime_env: z.boolean().optional(),
   resources: z
     .object({
       max_memory_mb: z.number().int().positive().optional(),
@@ -94,6 +96,8 @@ export interface ParsedPluginManifest {
   entry: { command: string; args: string[] };
   capabilities: Capability[];
   permissions: string[];
+  /** 需要外部运行环境（manifest runtime_env: true） */
+  runtimeEnv: boolean;
   riskLevel: PluginRisk;
   configSchema?: Record<string, unknown>;
   secrets: string[];
@@ -191,6 +195,7 @@ export function validateManifest(raw: unknown, options: ValidateManifestOptions)
       description: data.description,
       entry: { command: data.entry.command, args: data.entry.args ?? [] },
       capabilities: data.capabilities,
+    runtimeEnv: data.runtime_env === true,
       permissions: data.permissions,
       riskLevel: data.risk_level,
       configSchema: data.config_schema,

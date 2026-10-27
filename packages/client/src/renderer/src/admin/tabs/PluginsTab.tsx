@@ -1,9 +1,11 @@
 import type { PluginInfo } from "@anteros/shared";
-import { useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { Modal, useConfirm } from "../../components/Modal";
+import { humanizeError } from "../../lib/errors";
 import { invoke, normalizeError } from "../../lib/kernel";
 import { PLUGIN_STATUS_LABEL, RISK_LABEL, labelOf } from "../../lib/labels";
-import { pushToast, useAppState } from "../../lib/store";
+import { applyPluginRuntime, pushToast, useAppState } from "../../lib/store";
+import { PluginRuntimePanel } from "../PluginRuntime";
 import { PLUGIN_KIND_LABEL, LoadingLine, Section, describePermission, reportError, requestToken, useLoad } from "../helpers";
 
 /** 与内核 `host.ts` 的 HIGH_RISK_PERMISSION 同一组前缀：授权弹窗里这些项要标红。 */
@@ -78,6 +80,42 @@ export function PluginsTab() {
     const risk = RISK_ORDER[left.riskLevel] - RISK_ORDER[right.riskLevel];
     return risk !== 0 ? risk : left.name.localeCompare(right.name);
   });
+
+  /**
+   * 运行环境状态不随 plugins.list 返回（内核按插件单独查）：进面板时给每个
+   * runtimeEnv 插件补一次 status，之后由 `event.runtime` 持续推进。
+   */
+  const [runtimeErrors, setRuntimeErrors] = useState<Record<string, string>>({});
+  const runtimeIds = plugins
+    .filter((plugin) => plugin.runtimeEnv)
+    .map((plugin) => plugin.id)
+    .join("|");
+
+  const loadRuntimeStatus = (id: string): void => {
+    void invoke("plugins.runtime.status", { id })
+      .then((status) => {
+        applyPluginRuntime(status);
+        setRuntimeErrors((previous) => {
+          if (previous[id] === undefined) return previous;
+          const next = { ...previous };
+          delete next[id];
+          return next;
+        });
+      })
+      .catch((error: unknown) => {
+        const human = humanizeError(error);
+        setRuntimeErrors((previous) => ({
+          ...previous,
+          [id]: human.hint ? `${human.title}（${human.hint}）` : human.title,
+        }));
+      });
+  };
+
+  useEffect(() => {
+    const ids = runtimeIds.length === 0 ? [] : runtimeIds.split("|");
+    for (const id of ids) loadRuntimeStatus(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runtimeIds]);
 
   const run = async (id: string, action: () => Promise<void>): Promise<void> => {
     setBusyId(id);
@@ -322,109 +360,138 @@ export function PluginsTab() {
               const riskColor = riskClass(plugin.riskLevel);
               const defaultOff = !plugin.enabled && plugin.riskLevel !== "low";
               const missingGrants = missingGrantsOf(plugin);
+              // 状态还没取到也按「缺运行环境」处理：runtimeEnv 插件没装环境本来就不能启用
+              const runtimeStatus = state.pluginRuntime[plugin.id] ?? null;
+              const runtimeMissing =
+                plugin.runtimeEnv && (runtimeStatus === null || runtimeStatus.installed === null);
               return (
-                <tr key={plugin.id}>
-                  <td>
-                    <div className="table-strong">{plugin.name}</div>
-                    <div className="table-sub mono">
-                      {plugin.id} · v{plugin.version} · {PLUGIN_KIND_LABEL[plugin.kind] ?? plugin.kind}
-                    </div>
-                    <div className="table-sub">{plugin.description}</div>
-                    {plugin.issues.length > 0 ? (
-                      <div className="table-sub danger-text">{plugin.issues.join("；")}</div>
-                    ) : null}
-                    {plugin.missingSecrets.length > 0 ? (
-                      <div className="table-sub danger-text">
-                        缺密钥：{plugin.missingSecrets.join("、")}（录入后才能启用）
+                <Fragment key={plugin.id}>
+                  <tr>
+                    <td>
+                      <div className="table-strong">{plugin.name}</div>
+                      <div className="table-sub mono">
+                        {plugin.id} · v{plugin.version} · {PLUGIN_KIND_LABEL[plugin.kind] ?? plugin.kind}
                       </div>
-                    ) : plugin.secrets.length > 0 ? (
-                      <div className="table-sub muted">密钥已录入：{plugin.secrets.join("、")}</div>
-                    ) : null}
-                  </td>
-                  <td>
-                    <span className={riskColor}>{RISK_LABEL[plugin.riskLevel] ?? plugin.riskLevel}</span>
-                  </td>
-                  <td>
-                    <span className={statusClass(plugin.status)}>
-                      {labelOf(PLUGIN_STATUS_LABEL, plugin.status)}
-                    </span>
-                    {defaultOff ? <div className="table-sub muted">默认关闭</div> : null}
-                    {plugin.health && !plugin.health.ok ? (
-                      <div className="table-sub danger-text">{plugin.health.message}</div>
-                    ) : null}
-                  </td>
-                  <td>
-                    <div className="chip-wrap">
-                      {plugin.capabilities.map((capability) => (
-                        <span key={capability} className="chip" title={describePermission(capability)}>
-                          {capability}
-                        </span>
-                      ))}
-                    </div>
-                  </td>
-                  <td>
-                    <div className="chip-wrap">
-                      {plugin.permissions.map((permission) => {
-                        const granted = plugin.granted.includes(permission);
-                        return (
-                          <span
-                            key={permission}
-                            className={`chip ${granted ? "chip-ok" : "chip-muted"}`}
-                            title={describePermission(permission)}
-                          >
-                            {granted ? "✓ " : "✗ "}
-                            {permission}
+                      <div className="table-sub">{plugin.description}</div>
+                      {plugin.issues.length > 0 ? (
+                        <div className="table-sub danger-text">{plugin.issues.join("；")}</div>
+                      ) : null}
+                      {plugin.missingSecrets.length > 0 ? (
+                        <div className="table-sub danger-text">
+                          缺密钥：{plugin.missingSecrets.join("、")}（录入后才能启用）
+                        </div>
+                      ) : plugin.secrets.length > 0 ? (
+                        <div className="table-sub muted">密钥已录入：{plugin.secrets.join("、")}</div>
+                      ) : null}
+                    </td>
+                    <td>
+                      <span className={riskColor}>{RISK_LABEL[plugin.riskLevel] ?? plugin.riskLevel}</span>
+                    </td>
+                    <td>
+                      <span className={statusClass(plugin.status)}>
+                        {labelOf(PLUGIN_STATUS_LABEL, plugin.status)}
+                      </span>
+                      {defaultOff ? <div className="table-sub muted">默认关闭</div> : null}
+                      {plugin.health && !plugin.health.ok ? (
+                        <div className="table-sub danger-text">{plugin.health.message}</div>
+                      ) : null}
+                    </td>
+                    <td>
+                      <div className="chip-wrap">
+                        {plugin.capabilities.map((capability) => (
+                          <span key={capability} className="chip" title={describePermission(capability)}>
+                            {capability}
                           </span>
-                        );
-                      })}
-                    </div>
-                  </td>
-                  <td>
-                    <div className="row-actions column">
-                      <button
-                        className="btn btn-sm"
-                        disabled={busy || !isOwner || (!plugin.enabled && missingGrants.length > 0)}
-                        title={
-                          !plugin.enabled && missingGrants.length > 0
-                            ? `还差 ${missingGrants.length} 项授权：${missingGrants.join("、")}`
-                            : undefined
-                        }
-                        onClick={() => toggleEnabled(plugin)}
-                      >
-                        {plugin.enabled ? "停用" : "启用"}
-                      </button>
-                      {!plugin.enabled && missingGrants.length > 0 ? (
-                        <div className="table-sub muted">先授权 {missingGrants.length} 项能力</div>
-                      ) : null}
-                      <button
-                        className={`btn btn-sm${!plugin.enabled && missingGrants.length > 0 ? " btn-primary" : ""}`}
-                        disabled={busy || !isOwner}
-                        onClick={() => openGrant(plugin)}
-                      >
-                        授权
-                      </button>
-                      {plugin.secrets.length > 0 ? (
+                        ))}
+                      </div>
+                    </td>
+                    <td>
+                      <div className="chip-wrap">
+                        {plugin.permissions.map((permission) => {
+                          const granted = plugin.granted.includes(permission);
+                          return (
+                            <span
+                              key={permission}
+                              className={`chip ${granted ? "chip-ok" : "chip-muted"}`}
+                              title={describePermission(permission)}
+                            >
+                              {granted ? "✓ " : "✗ "}
+                              {permission}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </td>
+                    <td>
+                      <div className="row-actions column">
                         <button
-                          className={`btn btn-sm${plugin.missingSecrets.length > 0 ? " btn-primary" : ""}`}
-                          disabled={busy || !isOwner}
-                          onClick={() => openSecret(plugin)}
+                          className="btn btn-sm"
+                          disabled={
+                            busy ||
+                            !isOwner ||
+                            (!plugin.enabled && (missingGrants.length > 0 || runtimeMissing))
+                          }
+                          title={
+                            !plugin.enabled && runtimeMissing
+                              ? "这个插件要先下载运行环境才能启用"
+                              : !plugin.enabled && missingGrants.length > 0
+                                ? `还差 ${missingGrants.length} 项授权：${missingGrants.join("、")}`
+                                : undefined
+                          }
+                          onClick={() => toggleEnabled(plugin)}
                         >
-                          {plugin.missingSecrets.length > 0 ? "录入密钥" : "密钥"}
+                          {plugin.enabled ? "停用" : runtimeMissing ? "先下载运行环境" : "启用"}
                         </button>
-                      ) : null}
-                      <button className="btn btn-sm" disabled={busy || !isOwner} onClick={() => openConfig(plugin)}>
-                        配置
-                      </button>
-                      <button
-                        className="btn btn-sm btn-ghost"
-                        disabled={busy || !isOwner || !plugin.enabled}
-                        onClick={() => restart(plugin)}
-                      >
-                        重启
-                      </button>
-                    </div>
-                  </td>
-                </tr>
+                        {!plugin.enabled && missingGrants.length > 0 ? (
+                          <div className="table-sub muted">先授权 {missingGrants.length} 项能力</div>
+                        ) : null}
+                        <button
+                          className={`btn btn-sm${!plugin.enabled && missingGrants.length > 0 ? " btn-primary" : ""}`}
+                          disabled={busy || !isOwner}
+                          onClick={() => openGrant(plugin)}
+                        >
+                          授权
+                        </button>
+                        {plugin.secrets.length > 0 ? (
+                          <button
+                            className={`btn btn-sm${plugin.missingSecrets.length > 0 ? " btn-primary" : ""}`}
+                            disabled={busy || !isOwner}
+                            onClick={() => openSecret(plugin)}
+                          >
+                            {plugin.missingSecrets.length > 0 ? "录入密钥" : "密钥"}
+                          </button>
+                        ) : null}
+                        <button
+                          className="btn btn-sm"
+                          disabled={busy || !isOwner}
+                          onClick={() => openConfig(plugin)}
+                        >
+                          配置
+                        </button>
+                        <button
+                          className="btn btn-sm btn-ghost"
+                          disabled={busy || !isOwner || !plugin.enabled}
+                          onClick={() => restart(plugin)}
+                        >
+                          重启
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                  {plugin.runtimeEnv ? (
+                    <tr className="plugin-runtime-row">
+                      <td colSpan={6}>
+                        <PluginRuntimePanel
+                          plugin={plugin}
+                          status={runtimeStatus}
+                          loadError={runtimeErrors[plugin.id] ?? null}
+                          canEdit={isOwner}
+                          onReloadStatus={() => loadRuntimeStatus(plugin.id)}
+                        />
+                      </td>
+                    </tr>
+                  ) : null}
+                </Fragment>
               );
             })}
           </tbody>

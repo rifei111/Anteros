@@ -12,12 +12,13 @@
  */
 import path from "node:path";
 import { AnterosError, ERROR_CODES } from "@anteros/shared";
-import type { PluginInfo } from "@anteros/shared";
+import type { PluginInfo, PluginRuntimeStatus } from "@anteros/shared";
 import type { KernelDeps, PluginHostPort } from "../contracts.js";
 import { PluginHost, defaultCanEnable } from "../plugins/host.js";
 import type { CallOptions } from "../plugins/host.js";
 import { GrantStore } from "../plugins/grants.js";
 import { PluginRegistry } from "../plugins/registry.js";
+import { PluginRuntimeManager } from "../plugins/runtime.js";
 import { SecretStore } from "../plugins/secrets.js";
 import type {
   CanEnableFn,
@@ -31,6 +32,7 @@ import { loadOrCreateMasterKey } from "../util/crypto.js";
 import type { LogSink } from "../util/log.js";
 import type { AuditService } from "./audit.js";
 import type { ConsentService } from "./consent.js";
+import { SettingsService } from "../settings.js";
 import type { PermissionsService } from "./permissions.js";
 
 /** PluginService 的构造选项。pluginsDir 由 app 传入（开发态默认 <repo>/plugins）。 */
@@ -76,6 +78,8 @@ export class PluginService implements PluginHostPort {
   private readonly secrets: SecretStore;
   private readonly grants: GrantStore;
   private readonly host: PluginHost;
+  /** 插件运行环境（下载/增量升级/卸载），见 plugins/runtime.ts */
+  private readonly runtime: PluginRuntimeManager;
   private readonly ports: HostPorts;
   private readonly dataDirectory: string;
   private readonly options: PluginServiceOptions;
@@ -133,6 +137,16 @@ export class PluginService implements PluginHostPort {
 
     this.grants = new GrantStore(deps.db, (action, detail) => {
       this.audit.log(action, { actorRole: "owner", after: detail });
+    });
+
+    this.runtime = new PluginRuntimeManager({
+      rootDir: path.join(this.dataDirectory, "plugin-runtime"),
+      log: prefixed(deps.log, "[runtime] "),
+      emit: (status) => this.emit("event.runtime", status),
+      feedUrl:
+        (typeof process.env.ANTEROS_PLUGIN_FEED === "string" && process.env.ANTEROS_PLUGIN_FEED.trim().length > 0
+          ? process.env.ANTEROS_PLUGIN_FEED.trim()
+          : new SettingsService(deps.db).getJson<string>("plugins.feedUrl", "")),
     });
 
     // 首次装配即扫描插件目录：把 manifest 结果落库（幂等，不覆盖用户配置）。
@@ -287,6 +301,81 @@ export class PluginService implements PluginHostPort {
       after: { pluginId, name },
     });
     return this.requireInfo(pluginId);
+  }
+
+  /* --------------------------- 插件运行环境 --------------------------- */
+
+  /** 读 / 写更新源（写要 owner + 审计；只记 URL，不记内容）。 */
+  runtimeFeed(url?: string): { url: string } {
+    if (typeof url !== "string") return { url: this.runtime.getFeedUrl() };
+    this.permissions.assertOwner("plugin.runtime.feed");
+    const next = this.runtime.setFeedUrl(url);
+    new SettingsService(this.deps.db).setJson("plugins.feedUrl", next);
+    this.audit.log("plugin.runtime.feed", { actorRole: "owner", after: { url: next } });
+    return { url: next };
+  }
+
+  runtimeStatus(pluginId: string): PluginRuntimeStatus {
+    this.requireInfo(pluginId);
+    return this.runtime.status(pluginId);
+  }
+
+  async runtimeCheck(pluginId: string): Promise<PluginRuntimeStatus> {
+    this.requireInfo(pluginId);
+    this.permissions.assertOwner("plugin.runtime.check");
+    const status = await this.runtime.check(pluginId);
+    this.audit.log("plugin.runtime.check", {
+      actorRole: "owner",
+      after: { pluginId, available: status.available?.version ?? null },
+    });
+    return status;
+  }
+
+  /** 下载并安装/升级运行环境；装完把路径写进插件配置（插件自己决定怎么用）。 */
+  async runtimeInstall(pluginId: string): Promise<PluginRuntimeStatus> {
+    this.requireInfo(pluginId);
+    this.permissions.assertOwner("plugin.runtime.install");
+    await this.consent.requireConsent();
+    const status = await this.runtime.install(pluginId);
+    this.audit.log("plugin.runtime.install", {
+      actorRole: "owner",
+      after: {
+        pluginId,
+        version: status.installed?.version ?? null,
+        mode: status.installed?.mode ?? null,
+        fileCount: status.installed?.fileCount ?? 0,
+      },
+    });
+    this.syncRuntimeIntoConfig(pluginId, status);
+    return status;
+  }
+
+  async runtimeUninstall(pluginId: string): Promise<PluginRuntimeStatus> {
+    this.requireInfo(pluginId);
+    this.permissions.assertOwner("plugin.runtime.uninstall");
+    const status = await this.runtime.uninstall(pluginId);
+    this.audit.log("plugin.runtime.uninstall", { actorRole: "owner", after: { pluginId } });
+    this.syncRuntimeIntoConfig(pluginId, status);
+    return status;
+  }
+
+  /** 把「有没有装运行环境、装在哪、什么版本」写进插件配置，插件通过 kernel.config.get 就能读到。 */
+  private syncRuntimeIntoConfig(pluginId: string, status: PluginRuntimeStatus): void {
+    try {
+      const info = this.requireInfo(pluginId);
+      const config: Record<string, unknown> = { ...info.config };
+      if (status.installed === null) {
+        delete config.runtimePath;
+        delete config.runtimeVersion;
+      } else {
+        config.runtimePath = status.installed.path;
+        config.runtimeVersion = status.installed.version;
+        config.runtimeMode = status.installed.mode;
+      }
+      this.host.setConfig(pluginId, config);
+    } catch (error) {
+      this.log.warn(`把运行环境写进插件配置失败：${pluginId}：${String(error)}`);
+    }
   }
 
   private requireInfo(pluginId: string): PluginInfo {

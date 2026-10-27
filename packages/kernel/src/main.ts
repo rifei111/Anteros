@@ -7,6 +7,7 @@ import { pipeNameFor, App } from "./app.js";
 import { bootstrap } from "./bootstrap.js";
 import { IpcServer } from "./ipc/server.js";
 import { AnterosError } from "@anteros/shared";
+import { useSystemCertificates } from "./util/net.js";
 
 async function main(): Promise<void> {
   const dataDir = process.env.ANTEROS_DATA_DIR;
@@ -21,6 +22,8 @@ async function main(): Promise<void> {
   const logLevel = (process.env.ANTEROS_LOG_LEVEL as "debug" | "info" | "warn" | "error" | undefined) ?? "info";
 
   const runtime = bootstrap({ dataDir, tz, logLevel });
+  // 本机可能装了 TLS 中间人代理：并入系统根证书，否则下载/探测会报证书错
+  useSystemCertificates(runtime.logger.child("net"));
   const app = new App(runtime, pipeName);
   const ipc = new IpcServer({
     pipeName,

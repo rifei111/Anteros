@@ -10,6 +10,9 @@
  * 用法：npm.cmd run build:kernel 之后 `node scripts/smoke-kernel.mjs`
  */
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
+import { createHash } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
@@ -43,6 +46,105 @@ const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "anteros-smoke-"));
 const token = Array.from({ length: 32 }, () => Math.floor(Math.random() * 256).toString(16).padStart(2, "0")).join("");
 const pipeName = `\\\\.\\pipe\\anteros-smoke-${process.pid}-${Date.now().toString(36)}`;
 
+
+
+/** 最小 ustar 打包（普通文件），供本地更新源生成 tar.gz 整包 */
+function packTarGz(entries) {
+  const blocks = [];
+  for (const entry of entries) {
+    const data = Buffer.from(entry.data, "utf8");
+    const header = Buffer.alloc(512, 0);
+    header.write(entry.path.slice(0, 100), 0, "utf8");
+    header.write("0000644\0", 100, "ascii");
+    header.write("0000000\0", 108, "ascii");
+    header.write("0000000\0", 116, "ascii");
+    header.write(data.length.toString(8).padStart(11, "0") + "\0", 124, "ascii");
+    header.write("00000000000\0", 136, "ascii");
+    header.write("        ", 148, "ascii");
+    header.write("0", 156, "ascii");
+    header.write("ustar\0" + "00", 257, "ascii");
+    let checksum = 0;
+    for (const byte of header) checksum += byte;
+    header.write(checksum.toString(8).padStart(6, "0") + "\0 ", 148, "ascii");
+    blocks.push(header);
+    blocks.push(data);
+    const pad = (512 - (data.length % 512)) % 512;
+    if (pad > 0) blocks.push(Buffer.alloc(pad, 0));
+  }
+  blocks.push(Buffer.alloc(1024, 0));
+  return gzipSync(Buffer.concat(blocks));
+}
+
+/* 本地更新源：给「插件运行环境」用的真 http 服务（清单 + 按文件内容寻址的字节） */
+const runtimeFileSets = {
+  "1.0.0": [
+    { path: "adapter/entry.mjs", data: "export const version = '1.0.0';\n" },
+    { path: "adapter/README.md", data: "# wechat-replica runtime\n" },
+  ],
+  "1.1.0": [
+    { path: "adapter/entry.mjs", data: "export const version = '1.1.0';\n" },
+    { path: "adapter/README.md", data: "# wechat-replica runtime\n" },
+  ],
+};
+const sha256 = (buffer) => createHash("sha256").update(buffer).digest("hex");
+const fileRoute = new Map();
+for (const files of Object.values(runtimeFileSets)) {
+  for (const file of files) {
+    const bytes = Buffer.from(file.data, "utf8");
+    fileRoute.set("/files/" + sha256(bytes), bytes);
+  }
+}
+const archiveRoute = new Map();
+for (const version of Object.keys(runtimeFileSets)) {
+  const bytes = packTarGz(runtimeFileSets[version]);
+  archiveRoute.set("/pkg-" + version + ".tar.gz", bytes);
+}
+const downloadHits = [];
+let feedVersion = "1.0.0";
+const feedState = { pluginId: "channel.wechat-replica" };
+const localFeedServer = createServer((request, response) => {
+  const url = request.url ?? "/";
+  if (url === "/feed.json") {
+    const files = runtimeFileSets[feedVersion].map((file) => {
+      const bytes = Buffer.from(file.data, "utf8");
+      return { path: file.path, sha256: sha256(bytes), size: bytes.length };
+    });
+    const body = {
+      schema: 1,
+      packages: {
+        [feedState.pluginId]: {
+          pluginId: feedState.pluginId,
+          version: feedVersion,
+          notes: "冒烟用的本地运行环境包",
+          entry: "adapter/entry.mjs",
+          archive: {
+            url: feedBaseUrl + "/pkg-" + feedVersion + ".tar.gz",
+            sha256: sha256(archiveRoute.get("/pkg-" + feedVersion + ".tar.gz")),
+            size: archiveRoute.get("/pkg-" + feedVersion + ".tar.gz").length,
+            format: "tar.gz",
+          },
+          files,
+          filesBaseUrl: feedBaseUrl + "/files",
+        },
+      },
+    };
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify(body));
+    return;
+  }
+  const bytes = fileRoute.get(url) ?? archiveRoute.get(url);
+  if (bytes === undefined) {
+    response.statusCode = 404;
+    response.end("not found");
+    return;
+  }
+  downloadHits.push(url);
+  response.setHeader("content-type", "application/octet-stream");
+  response.end(bytes);
+});
+await new Promise((resolve) => localFeedServer.listen(0, "127.0.0.1", resolve));
+const feedBaseUrl = "http://127.0.0.1:" + localFeedServer.address().port;
+
 const child = spawn(process.execPath, [kernelEntry], {
   env: {
     ...process.env,
@@ -50,6 +152,7 @@ const child = spawn(process.execPath, [kernelEntry], {
     ANTEROS_PIPE_NAME: pipeName,
     ANTEROS_TOKEN: token,
     ANTEROS_LOG_LEVEL: "warn",
+    ANTEROS_PLUGIN_FEED: feedBaseUrl + "/feed.json",
   },
   stdio: ["ignore", "pipe", "pipe"],
   windowsHide: true,
@@ -370,6 +473,52 @@ try {
   const audit = await call("audit.list", { limit: 50 });
   check("审计日志记录了 owner 操作", Array.isArray(audit) && audit.length >= 1, `entries=${audit.length}`);
   check("审计里不出现消息正文", Array.isArray(audit) && !audit.some((entry) => JSON.stringify(entry).includes("今天有点累")));
+
+  /* 17. 插件运行环境：检查 → 下载（按文件增量）→ 落地 → 再升级只下变了的那几个文件 → 卸载 */
+  const runtimeId = "channel.wechat-replica";
+  const runtime0 = await call("plugins.runtime.status", { id: runtimeId });
+  check("运行环境初始未安装", runtime0.installed === null, "installed=" + JSON.stringify(runtime0.installed));
+  check("运行环境状态带上更新源", runtime0.feedUrl.includes("/feed.json"), runtime0.feedUrl);
+
+  const runtimeCheck1 = await call("plugins.runtime.check", { id: runtimeId });
+  check(
+    "检查更新：能读到 1.0.0 且提示可安装",
+    runtimeCheck1.updateAvailable === true && runtimeCheck1.available?.version === "1.0.0",
+    "available=" + JSON.stringify(runtimeCheck1.available?.version ?? null),
+  );
+
+  const runtimeInstalled1 = await call("plugins.runtime.install", { id: runtimeId });
+  check(
+    "下载安装成功且落到磁盘",
+    runtimeInstalled1.installed?.version === "1.0.0" && runtimeInstalled1.installed?.fileCount === 2,
+    "installed=" + JSON.stringify(runtimeInstalled1.installed?.version ?? null),
+  );
+  check("首次安装走整包（mode=archive）", runtimeInstalled1.installed?.mode === "archive", runtimeInstalled1.installed?.mode);
+  const onDiskEntry = fs.readFileSync(path.join(runtimeInstalled1.installed?.path ?? "", "adapter/entry.mjs"), "utf8");
+  check("文件内容与清单一致", onDiskEntry.includes("1.0.0"), onDiskEntry.trim());
+
+  const runtimeCheck2 = await call("plugins.runtime.check", { id: runtimeId });
+  check("已是最新时不再提示更新", runtimeCheck2.updateAvailable === false);
+
+  feedVersion = "1.1.0";
+  const runtimeCheck3 = await call("plugins.runtime.check", { id: runtimeId });
+  check(
+    "发布新版后检查到 1.1.0",
+    runtimeCheck3.updateAvailable === true && runtimeCheck3.available?.version === "1.1.0",
+    "available=" + JSON.stringify(runtimeCheck3.available?.version ?? null),
+  );
+
+  const beforeHits = downloadHits.length;
+  const runtimeInstalled2 = await call("plugins.runtime.install", { id: runtimeId });
+  const deltaHits = downloadHits.length - beforeHits;
+  check("升级到 1.1.0 成功", runtimeInstalled2.installed?.version === "1.1.0", String(runtimeInstalled2.installed?.version ?? null));
+  check("增量升级只下载变了的那 1 个文件", deltaHits === 1, "downloaded=" + deltaHits);
+  const upgradedEntry = fs.readFileSync(path.join(runtimeInstalled2.installed?.path ?? "", "adapter/entry.mjs"), "utf8");
+  check("升级后磁盘内容是新的", upgradedEntry.includes("1.1.0"), upgradedEntry.trim());
+
+  const runtimeGone = await call("plugins.runtime.uninstall", { id: runtimeId });
+  check("卸载后状态清空、目录删掉", runtimeGone.installed === null && !fs.existsSync(runtimeInstalled2.installed?.path ?? ""));
+
 } catch (error) {
   check("端到端流程", false, error.message);
 } finally {
@@ -380,6 +529,11 @@ try {
   }
   child.kill();
   await new Promise((resolve) => setTimeout(resolve, 300));
+  try {
+    localFeedServer.close();
+  } catch {
+    /* ignore */
+  }
   try {
     fs.rmSync(dataDir, { recursive: true, force: true });
   } catch {

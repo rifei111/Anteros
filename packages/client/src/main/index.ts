@@ -353,6 +353,20 @@ async function clickSmokeButton(window: BrowserWindow): Promise<void> {
       await sleep(400);
       continue;
     }
+    // 「#scrollsel=选择器」：把指定元素滚到视野中间（比按文字找更准）
+    if (text.startsWith("#scrollsel=")) {
+      await scriptInPage(
+        window,
+        `(() => {
+          const element = document.querySelector(${JSON.stringify(text.slice("#scrollsel=".length))});
+          if (!element) return false;
+          element.scrollIntoView({ block: "center" });
+          return true;
+        })()`,
+      );
+      await sleep(500);
+      continue;
+    }
     // 「#scroll=某段文字」：把含这段文字的元素滚到视野中间，方便截图
     if (text.startsWith("#scroll=")) {
       const wanted = text.slice("#scroll=".length);

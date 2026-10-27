@@ -158,14 +158,34 @@ node --input-type=module -e "import {DatabaseSync} from 'node:sqlite'; const db=
 - **自检口子**：`ANTEROS_SMOKE_CLICK` 支持 `#type=选择器=值`（填输入框）与 `#scroll=某段文字`（滚到视野内），
   配合原来的 `ANTEROS_SMOKE_TAB`/`ANTEROS_SMOKE_SEND` 可以把"选预设 → 填密钥 → 保存 → 授权 → 启用"整条链路走完再截图。
 
+## 13. v0.5.0 增补（插件运行环境：应用内下载 / 按文件增量更新）
+
+- **运行环境自助安装（已验证）**：需要外部环境的插件（`runtime_env: true`，目前只有微信通道骨架）卡片下多一块「运行环境」，
+  未安装时给「下载运行环境」，从更新源取 `feed.json` 清单 → 按清单逐个文件下载（或整包 tar.gz）→ 校验 SHA-256 →
+  解到临时目录 → 原子重命名到 `plugin-runtime/<pluginId>/<version>`。界面显示已安装版本、大小、文件数、
+  安装模式（整包/增量）、安装时间与本地路径。
+- **按文件增量升级（已验证）**：清单里每个文件都带 sha256，本地已存在且哈希一致的文件直接复用，
+  只下载变了的那些；升级成功后目录从 `1.0.0` 变成 `1.1.0`，旧目录在切换成功后才清理。
+  实测：v1.0.0 → v1.1.0 的增量升级只下载了 1 个文件（另 2 个复用本地）。
+- **更新源可改**：默认 `https://github.com/rifei111/Anteros/releases/download/runtime-feed-v1/feed.json`；
+  也可用 `file:///` 局域网目录或自建 https；界面里能改，改完写审计。内核只接受 http/https/file 三类协议，
+  拒绝路径逃逸（`../`、绝对路径）与超过 8MB 的清单。
+- **失败不毁旧版本**：校验不过、下载中断、解包失败都保留原目录，错误写进 `error` 并以人话显示在卡片里。
+- **冒烟扩到 64 项**：新增第 17 组 9 条——本地 http 更新源、首次整包安装（`mode=archive`、3 个文件、内容一致）、
+  已是最新不再提示、发布新版后检查到 1.1.0、增量升级只下 1 个文件、磁盘内容已更新、卸载后目录消失等。
+- **真实更新源已发布**：GitHub Release `runtime-feed-v1`（1.0.0）与 `runtime-feed-v2`（1.1.0），
+  各含 `feed.json`、`wechat-replica-<ver>.tar.gz` 与以文件 sha256 命名的单文件资产；真网跑通「检查 → 安装 → 检查更新 → 增量升级 → 卸载」。
+- **边界**：Anteros 不自带、不注入、不逆向第三方客户端；这里只是「下载 → 校验 → 原子切换」的安装器，
+  第三方环境由 owner 自己点下载、自己授权。
+
 ## 2026-10-26 验收记录（本机 Windows 11 / Node 24 / Electron 45）
 
 ```
 M0c 验收：通过（界面内逐项点击另列遗留）
 构建：shared ✅ kernel ✅ client ✅   —— npm.cmd run build 全绿
 类型：npm.cmd run typecheck          —— 0 error（shared/kernel/client 三套 tsconfig）
-单测：npm.cmd test                   —— 16 文件 / 95 用例全绿（v0.2.0 人设编译 9 例 + v0.3.0 插件密钥 6 例）
-冒烟：npm.cmd run smoke:kernel       —— 52 项全过（真起内核进程 + 命名管道）
+单测：npm.cmd test                   —— 17 文件 / 101 用例全绿（v0.2.0 人设编译 9 例 + v0.3.0 插件密钥 6 例 + v0.5.0 运行环境 6 例）
+冒烟：npm.cmd run smoke:kernel       —— 64 项全过（真起内核进程 + 命名管道）
 边界：npm.cmd run lint               —— 0 violation
 插件：validate-plugins 7/7；package-check 19 通过 0 错误
 安装：NSIS 安装包约 117 MB；win-unpacked 实跑，声明闸 → 聊天 → 管理面板（11 页签）截图留证（v0.2.0 人格内核编译、v0.3.0 插件授权与密钥截图）
@@ -179,8 +199,8 @@ M0c 验收：通过（界面内逐项点击另列遗留）
 
 - 远端：`https://github.com/rifei111/Anteros`（public，`main`）。
 - 本地与远端在同一提交上，按"初始化骨架 → 内核闭环 → 客户端三视图 → 冒烟 31 项 → 插件启动与健康修复 →
-  可编辑人格内核 + 逐条发送（v0.2.0）→ 插件授权/密钥 + 消息去重（v0.3.0）"推进；Release `v0.1.0`（M0c 单机闭环）、
-  `v0.2.0`（人格内核可编辑）与 `v0.3.0`（插件授权与密钥、消息不重复）均已发布。
+  可编辑人格内核 + 逐条发送（v0.2.0）→ 插件授权/密钥 + 消息去重（v0.3.0）→ 模型页重做（v0.4.0）→
+  插件运行环境下载与增量更新（v0.5.0）"推进；Release `v0.1.0`～`v0.5.0` 均已发布。
 - 2026-10-26 夜间 `github.com:443` 一度不可达（`api.github.com` 正常），本次提交经 GitHub REST 的 Git Data API
   写入（blob → tree → commit → 更新 ref），因此提交哈希与本地对象一致，工作树干净。
 

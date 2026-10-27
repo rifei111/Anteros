@@ -14,6 +14,7 @@
     "fs.read:%USERPROFILE%\\Documents\\WeChat Files"
   ],
   "risk_level": "high",
+  "runtime_env": true,
   "enabled": false,
   "resources": { "max_memory_mb": 256, "max_cpu_pct": 10, "call_timeout_ms": 90000 },
   "healthcheck": { "method": "plugin.health.check", "interval_ms": 30000, "timeout_ms": 5000 }

@@ -343,10 +343,70 @@ export interface PluginInfo {
   secrets: string[];
   /** 上面这些密钥里还没录入的（缺了就启用不了） */
   missingSecrets: string[];
+  /** 这个插件要不要一份外部运行环境（v0.5：界面按它显示「下载运行环境」） */
+  runtimeEnv: boolean;
   /** manifest 校验/运行期问题，人话 */
   issues: string[];
   lastError?: string | null;
   enabledTs?: number | null;
+}
+
+/** 运行环境包里的一个文件（增量更新按 sha256 比对，只下变了的那几个）。 */
+export interface PluginRuntimeFile {
+  path: string;
+  sha256: string;
+  size: number;
+}
+
+/** 整包下载信息（二进制包，先落地再校验再解，校验不过一律不落地）。 */
+export interface PluginRuntimeArchive {
+  url: string;
+  sha256: string;
+  size: number;
+  format: "tar.gz" | "zip";
+}
+
+/** 更新源里的一个运行环境包。 */
+export interface PluginRuntimePackage {
+  pluginId: string;
+  version: string;
+  /** 发布说明（人话，界面上直接显示） */
+  notes?: string;
+  releasedTs?: number;
+  /** 装好之后要执行的入口文件（相对包根） */
+  entry?: string;
+  /** 整包（没有 files 或增量失败时用） */
+  archive?: PluginRuntimeArchive;
+  /** 文件清单；配合 filesBaseUrl 做按文件增量 */
+  files?: PluginRuntimeFile[];
+  /** 内容寻址的按文件下载地址：`${filesBaseUrl}/${sha256}` 返回该文件字节 */
+  filesBaseUrl?: string;
+}
+
+/** 本机已安装的运行环境。 */
+export interface PluginRuntimeInstall {
+  version: string;
+  /** 绝对路径：<dataDir>/plugin-runtime/<pluginId>/<version> */
+  path: string;
+  size: number;
+  fileCount: number;
+  installedTs: number;
+  /** 这次是怎么装上的：整包 or 按文件增量 */
+  mode: "archive" | "delta";
+  source: string;
+}
+
+/** 插件运行环境状态：界面一次拿全（装了没、能升到哪版、在干什么、错在哪）。 */
+export interface PluginRuntimeStatus {
+  pluginId: string;
+  feedUrl: string;
+  installed: PluginRuntimeInstall | null;
+  available: { version: string; size: number; notes?: string; releasedTs?: number } | null;
+  updateAvailable: boolean;
+  lastCheckTs: number | null;
+  busy: "idle" | "checking" | "downloading" | "applying";
+  progress: { phase: "download" | "verify" | "extract" | "apply"; percent: number; bytes: number; totalBytes: number } | null;
+  error: string | null;
 }
 
 /** 通道能力（规范 5 / 草案 14.3）：业务代码只许读能力，不许认通道名。 */
