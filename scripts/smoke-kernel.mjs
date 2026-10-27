@@ -333,7 +333,40 @@ try {
   const afterDelete = await call("plugins.secret.delete", { id: router.id, name: "llm.api_key" });
   check("删掉密钥后缺失状态是实时算的", afterDelete.missingSecrets.includes("llm.api_key"));
 
-  /* 15. 审计：owner 危险操作留下追加记录（不存消息原文） */
+  /* 15. 模型页：路由插件小节 + 真探测的两条路径 */
+  const llmStatus = await call("llm.status", {});
+  check(
+    "llm.status 带路由插件小节（模型页要在一个页面里管它）",
+    llmStatus.router !== null && llmStatus.router.id === "core.llm-router",
+    `router=${JSON.stringify(llmStatus.router?.id ?? null)}`,
+  );
+  check(
+    "路由插件小节里有它真读到的配置",
+    llmStatus.router !== null && typeof llmStatus.router.config === "object",
+  );
+  check(
+    "密钥删掉后，路由插件小节实时显示缺密钥",
+    llmStatus.router !== null && llmStatus.router.missingSecrets.includes("llm.api_key"),
+    `missing=${llmStatus.router?.missingSecrets.join(",")}`,
+  );
+  const probeFail = await call("llm.test", {
+    baseUrl: "http://127.0.0.1:9/v1",
+    apiKey: "sk-smoke-not-real",
+    model: "smoke-model",
+  });
+  check(
+    "真探测在不通的地址上返回 ok=false 且给人话",
+    probeFail.ok === false && probeFail.message.length > 0,
+    `via=${probeFail.via} http=${probeFail.httpStatus ?? "null"} msg=${probeFail.message.slice(0, 60)}`,
+  );
+  const probeNoKey = await call("llm.test", { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" });
+  check(
+    "不显式给密钥时用已保存的密钥探测（被拒也要说清楚 HTTP 与原因）",
+    probeNoKey.ok === false && probeNoKey.message.length > 0,
+    `msg=${probeNoKey.message.slice(0, 40)}`,
+  );
+
+  /* 16. 审计：owner 危险操作留下追加记录（不存消息原文） */
   const audit = await call("audit.list", { limit: 50 });
   check("审计日志记录了 owner 操作", Array.isArray(audit) && audit.length >= 1, `entries=${audit.length}`);
   check("审计里不出现消息正文", Array.isArray(audit) && !audit.some((entry) => JSON.stringify(entry).includes("今天有点累")));

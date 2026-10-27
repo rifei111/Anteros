@@ -41,6 +41,11 @@ export class LlmClient implements LlmPort {
     this.settings.setJson("llm.apiKeyEnc", key ? encryptString(this.masterKey, key) : null);
   }
 
+  /** 只给「测试连接」用：探测时要在内存里拿一次明文，不写日志、不回传客户端。 */
+  apiKeyForProbe(): string | null {
+    return this.apiKey();
+  }
+
   isConfigured(): boolean {
     return this.apiKey() !== null;
   }

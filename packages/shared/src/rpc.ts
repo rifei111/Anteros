@@ -22,6 +22,7 @@ import type {
   DriveState,
   HandshakeResult,
   Importance,
+  LlmProbeResult,
   LlmStatus,
   MemoryItem,
   MemoryKind,
@@ -173,6 +174,16 @@ export interface KernelApi {
   "cost.summary": MethodSpec<Record<string, never>, CostSummary>;
   "cost.setBudget": MethodSpec<{ monthlyCny: number }, CostSummary>;
   "llm.status": MethodSpec<Record<string, never>, LlmStatus>;
+  /** 真的发一次请求量延迟：先 GET /models，不通再发一次 1 token 的对话。不写任何配置。 */
+  "llm.test": MethodSpec<
+    {
+      baseUrl?: string;
+      /** 留空则用已保存的密钥 */
+      apiKey?: string;
+      model?: string;
+    },
+    LlmProbeResult
+  >;
   "llm.configure": MethodSpec<
     {
       providerId?: string;
@@ -182,6 +193,8 @@ export interface KernelApi {
       apiKey?: string;
       temperature?: number;
       maxTokens?: number;
+      /** 是否顺手把同一份配置写进 core.llm-router 的插件配置（默认 true） */
+      syncPlugin?: boolean;
     },
     { status: LlmStatus }
   >;

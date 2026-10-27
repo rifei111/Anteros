@@ -140,6 +140,24 @@ node --input-type=module -e "import {DatabaseSync} from 'node:sqlite'; const db=
   不累积文本；发送时的临时消息按真实 id 去重后再替换。修复前同一条回复被 `stream.parts` 与 `messages` 各画一次。
 - **单测**：新增 `plugin-secrets.test.ts` 6 例（action 归一正反、一次性 token、SecretStore 读写删、真实 manifest 声明确在）。
 
+## 12. v0.4.0 增补（模型页：一个页面管完全部模型配置）
+
+- **模型页按"服务商预设 → 地址/密钥/模型 → 真探测 → 保存"重做（已验证）**：
+  预设覆盖 DeepSeek / OpenAI / Kimi / 智谱 GLM / 通义千问 / 硅基流动 / OpenRouter / 本地 Ollama·LM Studio / 自定义，
+  点一下就把 Base URL 与默认模型填进表单；「拉取模型列表」走 `llm.test` 的 `/models`，把服务端真返回的模型列成可点选的芯片。
+- **"在线"必须是真连上过（已验证）**：新增 RPC `llm.test`（`GET {baseUrl}/models`，不通时退回一次 1 token 对话），
+  返回 HTTP 状态、往返延迟、模型列表与失败原因；失败原因用人话讲清楚（域名不存在 / 端口没起 / 自签证书 / 被墙 / 超时），
+  Node 的 `fetch failed` 会沿着 `cause` 链找到真正原因再翻译。密钥只在内存里用一次，不进日志、不进错误信息。
+- **插件里的模型服务回到模型页（已验证）**：`llm.status` 新增 `router` 小节（`core.llm-router` 的启用状态、
+  授权是否齐、缺哪些项、缺哪些密钥、它真读到的 baseUrl/model）；模型页下半部分直接显示并可「授权并启用 / 停用」，
+  保存配置时把 baseUrl/model 同步进插件配置、把 API Key 同步进插件密钥库——不用去插件页签再抄一遍。
+- **表单细节**：首次读到状态后填一次表单，之后用户改过就不再覆盖；温度与 maxTokens 可改可不改；
+  密钥输入框永远不回显旧值，留空表示不动。
+- **冒烟扩到 52 项**：新增「llm.status 带路由插件小节」「路由插件小节里有真读到的配置」「删密钥后小节实时缺密钥」
+  「真探测在不通的地址上返回 ok=false 且给人话」「不显式给密钥时用已保存的密钥探测」5 条。
+- **自检口子**：`ANTEROS_SMOKE_CLICK` 支持 `#type=选择器=值`（填输入框）与 `#scroll=某段文字`（滚到视野内），
+  配合原来的 `ANTEROS_SMOKE_TAB`/`ANTEROS_SMOKE_SEND` 可以把"选预设 → 填密钥 → 保存 → 授权 → 启用"整条链路走完再截图。
+
 ## 2026-10-26 验收记录（本机 Windows 11 / Node 24 / Electron 45）
 
 ```
@@ -147,7 +165,7 @@ M0c 验收：通过（界面内逐项点击另列遗留）
 构建：shared ✅ kernel ✅ client ✅   —— npm.cmd run build 全绿
 类型：npm.cmd run typecheck          —— 0 error（shared/kernel/client 三套 tsconfig）
 单测：npm.cmd test                   —— 16 文件 / 95 用例全绿（v0.2.0 人设编译 9 例 + v0.3.0 插件密钥 6 例）
-冒烟：npm.cmd run smoke:kernel       —— 45 项全过（真起内核进程 + 命名管道）
+冒烟：npm.cmd run smoke:kernel       —— 52 项全过（真起内核进程 + 命名管道）
 边界：npm.cmd run lint               —— 0 violation
 插件：validate-plugins 7/7；package-check 19 通过 0 错误
 安装：NSIS 安装包约 117 MB；win-unpacked 实跑，声明闸 → 聊天 → 管理面板（11 页签）截图留证（v0.2.0 人格内核编译、v0.3.0 插件授权与密钥截图）

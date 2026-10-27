@@ -9,11 +9,20 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { KERNEL_API_VERSION, PIPE_PREFIX, AnterosError, ERROR_CODES } from "@anteros/shared";
-import type { AppSnapshot, HandshakeResult, Persona, PersonaBlueprint, PluginInfo, TurnReplay } from "@anteros/shared";
+import type {
+  AppSnapshot,
+  HandshakeResult,
+  LlmStatus,
+  Persona,
+  PersonaBlueprint,
+  PluginInfo,
+  TurnReplay,
+} from "@anteros/shared";
 import type { Runtime } from "./bootstrap.js";
 import type { ChatDeps, ExpressionPort, KernelDeps, MemoryPort, MindPort, PluginHostPort } from "./contracts.js";
 import { loadOrCreateMasterKey } from "./util/crypto.js";
 import { LlmClient } from "./llm/client.js";
+import { probeProvider } from "./llm/probe.js";
 import { MemoryService } from "./memory/service.js";
 import { MindService } from "./mind/service.js";
 import { ExpressionService } from "./expression/service.js";
@@ -28,6 +37,9 @@ export function pipeNameFor(sessionId: string): string {
   const suffix = sessionId.replace(/[^A-Za-z0-9_-]+/g, "").slice(0, 32) || "default";
   return `\\\\.\\pipe\\${PIPE_PREFIX}-${suffix}`;
 }
+
+/** 用户自己换模型服务时用的那个插件（可选的代理层，不是唯一通路） */
+const ROUTER_PLUGIN_ID = "core.llm-router";
 
 /**
  * 插件目录解析：开发期在仓库根 `plugins/`，打包后在 `resources/plugins/`
@@ -430,6 +442,27 @@ export class App {
       }
       case "llm.status":
         return this.llmStatus();
+      case "llm.test": {
+        // 探测不写任何东西：地址、密钥、模型都可能只是"试着用一下"。
+        const saved = this.llm.status();
+        const apiKey =
+          typeof p.apiKey === "string" && p.apiKey.trim().length > 0 ? p.apiKey.trim() : this.llm.apiKeyForProbe();
+        const result = await probeProvider({
+          baseUrl:
+            typeof p.baseUrl === "string" && p.baseUrl.trim().length > 0
+              ? p.baseUrl.trim()
+              : (saved.baseUrl ?? this.runtime.settings.get("llm.baseUrl")),
+          apiKey,
+          model:
+            typeof p.model === "string" && p.model.trim().length > 0
+              ? p.model.trim()
+              : (saved.model ?? this.runtime.settings.get("llm.model")),
+        });
+        this.deps.log.info?.(
+          `[app] 模型探测 ${result.ok ? "通过" : "失败"}（${result.via}，${result.latencyMs}ms）：${result.message}`,
+        );
+        return result;
+      }
       case "llm.configure": {
         this.runtime.permissions.assertOwner("配置模型");
         if (typeof p.apiKey === "string" && p.apiKey.length > 0) this.llm.setApiKey(p.apiKey);
@@ -443,6 +476,9 @@ export class App {
         if (typeof p.apiKey === "string" && p.apiKey.trim().length > 0) {
           this.syncProviderPluginSecret("core.llm-router", "llm.api_key", p.apiKey.trim());
         }
+        // 地址/模型同理：路由插件读的是它自己的 config，用户在「模型」页改完就该同步过去，
+        // 否则会出现"页面显示 deepseek-chat、插件还在用旧地址"的分裂。
+        if (p.syncPlugin !== false) this.syncProviderPluginConfig();
         this.runtime.audit.log("llm.configure", { actorRole: "owner", after: { model: p.model ?? null, baseUrl: p.baseUrl ?? null } });
         return { status: this.llmStatus() };
       }
@@ -565,7 +601,51 @@ export class App {
       online: configured,
       lastError: status.lastError,
       degradedLocalEcho: !configured,
+      baseUrl: status.baseUrl ?? this.runtime.settings.get("llm.baseUrl"),
+      hasKey: configured,
+      temperature: this.runtime.settings.get("llm.temperature"),
+      maxTokens: this.runtime.settings.get("llm.maxTokens"),
+      router: this.routerStatus(),
     };
+  }
+
+  /** 路由插件（core.llm-router）的状态：模型页要把它和内核配置一起显示、一起管 */
+  private routerStatus(): LlmStatus["router"] {
+    const info = this.plugins.list().find((plugin) => plugin.id === ROUTER_PLUGIN_ID);
+    if (info === undefined) return null;
+    const missingGrants = info.grantable.filter((item) => !info.granted.includes(item));
+    return {
+      id: info.id,
+      enabled: info.enabled,
+      status: info.status,
+      grantedAll: missingGrants.length === 0,
+      missingGrants,
+      missingSecrets: info.missingSecrets,
+      issues: info.issues,
+      config: info.config,
+    };
+  }
+
+  /**
+   * 把内核里生效的地址/模型/采样参数写进路由插件的配置。
+   * 插件读的是自己的 config（manifest.config_schema），不读内核 settings——
+   * 所以「模型」页改完必须同步，否则两边会各用各的。
+   */
+  private syncProviderPluginConfig(): void {
+    try {
+      const current = this.plugins.list().find((plugin) => plugin.id === ROUTER_PLUGIN_ID);
+      if (current === undefined) return;
+      this.plugins.setConfig(ROUTER_PLUGIN_ID, {
+        ...current.config,
+        baseUrl: this.runtime.settings.get("llm.baseUrl"),
+        model: this.runtime.settings.get("llm.model"),
+        temperature: this.runtime.settings.get("llm.temperature"),
+        maxTokens: this.runtime.settings.get("llm.maxTokens"),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.deps.log.debug?.(`[app] 同步 ${ROUTER_PLUGIN_ID} 配置失败（不影响模型本身）：${message}`);
+    }
   }
 
   /**

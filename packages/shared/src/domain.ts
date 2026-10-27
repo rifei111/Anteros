@@ -437,6 +437,42 @@ export interface LlmStatus {
   lastError: string | null;
   /** 无密钥时是否退化为本地回声（可演示、不产生云端调用） */
   degradedLocalEcho: boolean;
+  /** 当前生效的根地址（不含密钥，可以显示） */
+  baseUrl?: string;
+  /** 是否已经存过密钥（只给布尔，永不回显值） */
+  hasKey?: boolean;
+  temperature?: number;
+  maxTokens?: number;
+  /** 路由插件（core.llm-router）的状态：模型页把它的配置也管起来 */
+  router?: LlmRouterStatus | null;
+}
+
+/** 模型页里「插件里的模型服务」一节要显示的东西 */
+export interface LlmRouterStatus {
+  id: string;
+  enabled: boolean;
+  status: string;
+  /** 授权是否齐了（缺哪几项见 missingGrants） */
+  grantedAll: boolean;
+  missingGrants: string[];
+  missingSecrets: string[];
+  issues: string[];
+  config: Record<string, unknown>;
+}
+
+/** 一次真实连通性探测的结果（llm.test） */
+export interface LlmProbeResult {
+  ok: boolean;
+  baseUrl: string;
+  model: string | null;
+  latencyMs: number;
+  /** 服务端 /models 返回的模型名（拿不到就是空数组） */
+  models: string[];
+  /** 靠哪条路径确认的：models 列表 / 一次 1 token 的对话 / 都没通 */
+  via: "models" | "chat" | "none";
+  httpStatus: number | null;
+  /** 人话结论，成功失败都用它 */
+  message: string;
 }
 
 export interface SystemHealth {

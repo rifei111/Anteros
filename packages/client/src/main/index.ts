@@ -330,6 +330,46 @@ async function clickSmokeButton(window: BrowserWindow): Promise<void> {
       await sleep(500);
       continue;
     }
+    // 「#type=选择器=值」：不点按钮，往指定输入框/文本域里填值（React onChange 要真 input 事件）
+    if (text.startsWith("#type=")) {
+      const spec = text.slice("#type=".length);
+      const split = spec.indexOf("=");
+      const selector = spec.slice(0, split);
+      const value = spec.slice(split + 1);
+      await scriptInPage(
+        window,
+        `(() => {
+          const element = document.querySelector(${JSON.stringify(selector)});
+          if (!element) return false;
+          const proto = element.tagName === "TEXTAREA"
+            ? window.HTMLTextAreaElement.prototype
+            : window.HTMLInputElement.prototype;
+          const setValue = Object.getOwnPropertyDescriptor(proto, "value").set;
+          setValue.call(element, ${JSON.stringify(value)});
+          element.dispatchEvent(new Event("input", { bubbles: true }));
+          return true;
+        })()`,
+      );
+      await sleep(400);
+      continue;
+    }
+    // 「#scroll=某段文字」：把含这段文字的元素滚到视野中间，方便截图
+    if (text.startsWith("#scroll=")) {
+      const wanted = text.slice("#scroll=".length);
+      await scriptInPage(
+        window,
+        `(() => {
+          const wanted = ${JSON.stringify(wanted)};
+          const element = Array.from(document.querySelectorAll(".admin-panel *"))
+            .find((item) => (item.textContent || "").includes(wanted) && item.children.length <= 3);
+          if (!element) return false;
+          element.scrollIntoView({ block: "center" });
+          return true;
+        })()`,
+      );
+      await sleep(500);
+      continue;
+    }
     const clicked = await scriptInPage(
       window,
       `(() => {
