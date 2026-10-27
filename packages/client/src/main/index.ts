@@ -51,6 +51,8 @@ const SMOKE_TAB = (process.env.ANTEROS_SMOKE_TAB ?? "").trim();
 const SMOKE_PERSONA_TEXT = (process.env.ANTEROS_SMOKE_PERSONA_TEXT ?? "").trim();
 /** 自检时点开的按钮文案（例如「录入密钥」「授权」），用来把弹窗截进图里。 */
 const SMOKE_CLICK = (process.env.ANTEROS_SMOKE_CLICK ?? "").trim();
+/** 自检时发出去的测试消息（chat 视图），用来确认一条消息只渲染一次。 */
+const SMOKE_SEND = (process.env.ANTEROS_SMOKE_SEND ?? "").trim();
 
 /** 数据目录可用 ANTEROS_DATA_DIR 覆盖（自检隔离数据，不污染 %APPDATA%\\Anteros）。 */
 function resolveDataDir(): string {
@@ -368,8 +370,37 @@ async function captureSmokeScreenshot(window: BrowserWindow, targetPath: string)
   console.warn(`[anteros] 自检截图已写入 ${targetPath}`);
 }
 
-function scheduleSmokeScreenshot(window: BrowserWindow): void {
-  const targetPath = SMOKE_SCREENSHOT_PATH;
+/** 自检用：往输入框写一句话并点发送，用来肉眼确认「一条消息只出现一次」。 */
+async function sendSmokeMessage(window: BrowserWindow): Promise<void> {
+  if (SMOKE_SEND.length === 0) return;
+  await waitForPage(window, `document.querySelector(".composer-input")`, "输入框");
+  await scriptInPage(
+    window,
+    `(() => {
+      const text = ${JSON.stringify(SMOKE_SEND)};
+      const input = document.querySelector(".composer-input");
+      if (!input) return false;
+      const proto = window.HTMLTextAreaElement.prototype;
+      const setValue = Object.getOwnPropertyDescriptor(proto, "value").set;
+      setValue.call(input, text);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      return true;
+    })()`,
+  );
+  await sleep(300);
+  await scriptInPage(
+    window,
+    `(() => {
+      const button = document.querySelector(".composer .send-btn");
+      if (button) button.click();
+      return Boolean(button);
+    })()`,
+  );
+  // 等内核把回复分条发完（本地回声也有打字节奏），截图才有完整一来一回
+  await sleep(12_000);
+}
+
+function scheduleSmokeScreenshot(window: BrowserWindow): void {  const targetPath = SMOKE_SCREENSHOT_PATH;
   if (!targetPath) return;
   if (SMOKE_VIEW === "consent" && SMOKE_SKIP_CONSENT) {
     console.warn("[anteros] 自检模式：声明闸未过也照常截图（不勾选，也不绕过声明闸本身）");
@@ -380,6 +411,7 @@ function scheduleSmokeScreenshot(window: BrowserWindow): void {
         if (SMOKE_VIEW !== "consent") {
           await driveToChat(window);
           if (SMOKE_VIEW === "admin") await openAdminPanel(window);
+          else await sendSmokeMessage(window);
         }
         await sleep(SMOKE_SETTLE_MS);
         await captureSmokeScreenshot(window, targetPath);

@@ -430,7 +430,16 @@ function upsertMessage(message: ChatMessage): void {
         messages: previous.messages.map((item) => (item.id === message.id ? { ...item, ...message } : item)),
       };
     }
-    const messages = [...previous.messages, message].sort(
+    // 自己发的消息：内核回声到达时把还在「发送中」的临时气泡摘掉，
+    // 否则同一条话会在列表里躺两条（一条 pending、一条权威）。
+    const withoutTemp =
+      message.role === "user"
+        ? previous.messages.filter(
+            (item) =>
+              !(item.id < 0 && item.delivery === "pending" && item.text === message.text && item.role === "user"),
+          )
+        : previous.messages;
+    const messages = [...withoutTemp, message].sort(
       (left, right) => left.ts - right.ts || left.id - right.id,
     );
     return { messages };
