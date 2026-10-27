@@ -40,11 +40,15 @@ export type AdminTab =
   | "advanced"
   | "data";
 
+/**
+ * 只记录「正在输入」的临时状态。
+ *
+ * 气泡的唯一真源是 `messages`（`event.message` → upsertMessage）；分条文本不在
+ * 客户端累积，否则同一句话会被画两遍（stream.parts + messages 各一次）。
+ */
 export interface StreamView {
   turnId: number | null;
-  /** 已到达的分条文本（临时气泡，收到 event.message 后替换为权威消息） */
-  parts: string[];
-  /** 是否在「正在输入…」（只来自 event.typing，不自己造计时器） */
+  /** 是否在「正在输入…」（只来自 event.typing / event.part，不自己造计时器） */
   typing: boolean;
   /** 内核给的预计打字时长（仅用于展示，不参与本地计时） */
   plannedMs: number | null;

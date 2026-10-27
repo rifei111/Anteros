@@ -269,6 +269,32 @@ export class PluginService implements PluginHostPort {
     return this.host.secret(pluginId, name);
   }
 
+  setSecret(pluginId: string, name: string, value: string): PluginInfo {
+    this.permissions.assertOwner("plugin.secret");
+    this.host.setSecret(pluginId, name, value);
+    this.audit.log("plugin.secret.put", {
+      actorRole: "owner",
+      after: { pluginId, name, length: value.trim().length },
+    });
+    return this.requireInfo(pluginId);
+  }
+
+  deleteSecret(pluginId: string, name: string): PluginInfo {
+    this.permissions.assertOwner("plugin.secret");
+    this.host.deleteSecret(pluginId, name);
+    this.audit.log("plugin.secret.delete", {
+      actorRole: "owner",
+      after: { pluginId, name },
+    });
+    return this.requireInfo(pluginId);
+  }
+
+  private requireInfo(pluginId: string): PluginInfo {
+    const found = this.list().find((item) => item.id === pluginId);
+    if (found === undefined) throw new AnterosError(ERROR_CODES.ENOTFOUND, `找不到插件：${pluginId}`);
+    return found;
+  }
+
   async shutdown(): Promise<void> {
     await this.host.shutdown();
   }

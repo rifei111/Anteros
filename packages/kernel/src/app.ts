@@ -370,6 +370,12 @@ export class App {
       }
       case "plugins.config.put":
         return this.plugins.setConfig(String(p.id), (p.config ?? {}) as Record<string, unknown>);
+      case "plugins.secret.put": {
+        await this.runtime.consent.requireConsent();
+        return this.plugins.setSecret(String(p.id), String(p.name), String(p.value ?? ""));
+      }
+      case "plugins.secret.delete":
+        return this.plugins.deleteSecret(String(p.id), String(p.name));
       case "plugins.restart":
         this.runtime.permissions.assertOwner("重启插件");
         return this.plugins.restart(String(p.id));
@@ -432,6 +438,11 @@ export class App {
         if (typeof p.temperature === "number") this.runtime.settings.set("llm.temperature", p.temperature);
         if (typeof p.maxTokens === "number") this.runtime.settings.set("llm.maxTokens", p.maxTokens);
         if (typeof p.providerId === "string" && p.providerId.length > 0) this.runtime.settings.set("llm.providerId", p.providerId);
+        // 模型 Key 同时递给声明了 llm.api_key 的 provider 插件：用户只在「模型」页配一次，
+        // 不该再去插件详情里把同一个 Key 抄第二遍。
+        if (typeof p.apiKey === "string" && p.apiKey.trim().length > 0) {
+          this.syncProviderPluginSecret("core.llm-router", "llm.api_key", p.apiKey.trim());
+        }
         this.runtime.audit.log("llm.configure", { actorRole: "owner", after: { model: p.model ?? null, baseUrl: p.baseUrl ?? null } });
         return { status: this.llmStatus() };
       }
@@ -555,6 +566,19 @@ export class App {
       lastError: status.lastError,
       degradedLocalEcho: !configured,
     };
+  }
+
+  /**
+   * 把内核侧配置里的密钥补给声明了同名密钥的插件（目前只有 core.llm-router 的 llm.api_key）。
+   * 插件没装/没声明就直接跳过——这是顺手的便利，不是硬依赖。
+   */
+  private syncProviderPluginSecret(pluginId: string, secretName: string, value: string): void {
+    try {
+      this.plugins.setSecret(pluginId, secretName, value);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.deps.log.debug?.(`[app] 同步 ${pluginId} 的 ${secretName} 失败（不影响模型本身）：${message}`);
+    }
   }
 
   private replay(turnId: number): TurnReplay {

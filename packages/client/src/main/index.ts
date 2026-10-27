@@ -49,6 +49,8 @@ const SMOKE_TIMEOUT_MS = 20_000;
 const SMOKE_TAB = (process.env.ANTEROS_SMOKE_TAB ?? "").trim();
 /** 自检时填进「人格」页签的人设原文并点一次「编译成人格内核」，用来验证这条链路真能跑。 */
 const SMOKE_PERSONA_TEXT = (process.env.ANTEROS_SMOKE_PERSONA_TEXT ?? "").trim();
+/** 自检时点开的按钮文案（例如「录入密钥」「授权」），用来把弹窗截进图里。 */
+const SMOKE_CLICK = (process.env.ANTEROS_SMOKE_CLICK ?? "").trim();
 
 /** 数据目录可用 ANTEROS_DATA_DIR 覆盖（自检隔离数据，不污染 %APPDATA%\\Anteros）。 */
 function resolveDataDir(): string {
@@ -300,7 +302,24 @@ async function openAdminTab(window: BrowserWindow): Promise<void> {
     })()`,
   );
   await sleep(600);
+  await clickSmokeButton(window);
   await fillPersonaAndCompile(window);
+}
+
+/** 自检用：点一个文案里带指定字样的按钮（例如「录入密钥」「授权」），用来截到弹窗。 */
+async function clickSmokeButton(window: BrowserWindow): Promise<void> {
+  if (SMOKE_CLICK.length === 0) return;
+  await scriptInPage(
+    window,
+    `(() => {
+      const text = ${JSON.stringify(SMOKE_CLICK)};
+      const button = Array.from(document.querySelectorAll(".admin-panel button"))
+        .find((b) => (b.textContent || "").includes(text));
+      if (button) button.click();
+      return Boolean(button);
+    })()`,
+  );
+  await sleep(1_200);
 }
 
 /** 自检用：往人设输入框里写一段话并点「编译成人格内核」（真实 input 事件，走 React onChange）。 */

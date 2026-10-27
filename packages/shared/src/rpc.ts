@@ -149,6 +149,9 @@ export interface KernelApi {
   "plugins.disable": MethodSpec<{ id: string }, PluginInfo>;
   "plugins.grant": MethodSpec<{ id: string; permissions: string[]; confirmToken?: string }, PluginInfo>;
   "plugins.config.put": MethodSpec<{ id: string; config: Record<string, unknown> }, PluginInfo>;
+  /** 录入或清除插件声明要的密钥（值只进 DPAPI/AES 落盘的密钥库，不回显）。 */
+  "plugins.secret.put": MethodSpec<{ id: string; name: string; value: string }, PluginInfo>;
+  "plugins.secret.delete": MethodSpec<{ id: string; name: string }, PluginInfo>;
   "plugins.restart": MethodSpec<{ id: string }, PluginInfo>;
 
   "channels.list": MethodSpec<Record<string, never>, ChannelInfo[]>;

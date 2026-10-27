@@ -327,12 +327,18 @@ export interface PluginInfo {
   capabilities: string[];
   /** 声明申请的能力（默认全拒） */
   permissions: string[];
+  /** 这一份插件里"能被授权"的全部条目 = capabilities + permissions（界面按它逐项勾选） */
+  grantable: string[];
   /** 已授予的能力 */
   granted: string[];
   status: PluginStatus;
   enabled: boolean;
   config: Record<string, unknown>;
   health: PluginHealth | null;
+  /** manifest 里声明要的密钥名（只给名字，永远不含值） */
+  secrets: string[];
+  /** 上面这些密钥里还没录入的（缺了就启用不了） */
+  missingSecrets: string[];
   /** manifest 校验/运行期问题，人话 */
   issues: string[];
   lastError?: string | null;

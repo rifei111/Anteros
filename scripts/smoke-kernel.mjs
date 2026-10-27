@@ -284,7 +284,44 @@ try {
   const updated = await call("persona.update", { patch: { traits: { burstMin: 9, burstMax: 9 } } });
   check("越界的数值被钳住而不是照单全收", updated.traits.burstMin <= 3 && updated.traits.burstMax <= 3, `burst=${updated.traits.burstMin}-${updated.traits.burstMax}`);
 
-  /* 14. 审计：owner 危险操作留下追加记录（不存消息原文） */
+  /* 14. 插件授权与启用：界面用 plugins.* 叫法换 token、宿主按 plugin.* 消费，必须能对上 */
+  const plugins = await call("plugins.list");
+  const wechat = plugins.find((item) => item.id === "channel.wechat-replica");
+  check(
+    "插件清单带可授权项与缺密钥字段",
+    Array.isArray(wechat?.grantable) && Array.isArray(wechat?.missingSecrets) && Array.isArray(wechat?.secrets),
+  );
+  const wechatGrantToken = await call("confirm.token", { action: "plugins.grant", target: wechat.id });
+  const grantedWechat = await call("plugins.grant", {
+    id: wechat.id,
+    permissions: wechat.grantable,
+    confirmToken: wechatGrantToken.token,
+  });
+  check("高危通道按 grantable 授权（含 channel.lease）", grantedWechat.granted.includes("channel.lease"));
+  const enableToken = await call("confirm.token", { action: "plugins.enable", target: wechat.id });
+  const enabledWechat = await call("plugins.enable", { id: wechat.id, confirmToken: enableToken.token });
+  check("高危通道用界面叫法的 token 也能启用", enabledWechat.enabled === true, `status=${enabledWechat.status}`);
+
+  const router = plugins.find((item) => item.id === "core.llm-router");
+  const grantToken = await call("confirm.token", { action: "plugins.grant", target: router.id });
+  const grantedRouter = await call("plugins.grant", {
+    id: router.id,
+    permissions: router.grantable,
+    confirmToken: grantToken.token,
+  });
+  check("按 grantable 逐项授权成功", grantedRouter.granted.length > 0, `granted=${grantedRouter.granted.join(",")}`);
+  const withSecret = await call("plugins.secret.put", {
+    id: router.id,
+    name: "llm.api_key",
+    value: "smoke-key-123456",
+  });
+  check("密钥录入后不再报缺失", withSecret.missingSecrets.length === 0, `missing=${withSecret.missingSecrets.join(",")}`);
+  const enabledRouter = await call("plugins.enable", { id: router.id });
+  check("缺密钥的插件录完密钥能启用", enabledRouter.enabled === true);
+  const afterDelete = await call("plugins.secret.delete", { id: router.id, name: "llm.api_key" });
+  check("删掉密钥后缺失状态是实时算的", afterDelete.missingSecrets.includes("llm.api_key"));
+
+  /* 15. 审计：owner 危险操作留下追加记录（不存消息原文） */
   const audit = await call("audit.list", { limit: 50 });
   check("审计日志记录了 owner 操作", Array.isArray(audit) && audit.length >= 1, `entries=${audit.length}`);
   check("审计里不出现消息正文", Array.isArray(audit) && !audit.some((entry) => JSON.stringify(entry).includes("今天有点累")));

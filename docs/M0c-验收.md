@@ -124,28 +124,45 @@ node --input-type=module -e "import {DatabaseSync} from 'node:sqlite'; const db=
   合并为一条、内容未变不再弹，并过滤掉"尚未勾选声明"这类第一跑的预期状态。
 - **自检口子**：`ANTEROS_SMOKE_TAB=<页签文本>` 点开指定页签，`ANTEROS_SMOKE_PERSONA_TEXT=<人设>` 自动填入并编译，
   用于无人值守截图验证；不设这两个变量时行为与之前完全一致。
+## 11. v0.3.0 增补（插件授权与密钥 / 消息不重复）
+
+- **插件能授权了（已验证）**：确认 token 的 action 归一（界面叫 `plugins.enable`/`plugins.grant`，宿主消费叫
+  `plugin.enable`/`plugin.grant`，现在两边都认、真正不同的动作仍拒绝）；授权弹窗按 `PluginInfo.grantable`
+  （capabilities ∪ permissions）逐项勾选，`channel.write` 依赖的 `channel.lease` 终于能被勾上。
+  复现脚本：`release/probe-plugins.mjs`（临时目录起真内核走完整授权链路，不进仓库）。
+- **声明了密钥的插件能录密钥了（已验证）**：新增 `plugins.secret.put` / `plugins.secret.delete`，密钥经
+  SecretStore（AES-256-GCM 落盘本机）保存；审计只记"哪个插件的哪个密钥名 + 长度"，不记值。
+  `PluginInfo.secrets` / `missingSecrets` 每次实时重算，删掉密钥后"缺密钥"立刻回来。
+  `llm.configure` 带 apiKey 时会顺手把密钥同步给 `core.llm-router`，配完即可用。
+  冒烟断言：微信通道按 `grantable` 授权（含 `channel.lease`）→ 带 token 启用成功；LLM 路由授予能力 →
+  录密钥 → 缺密钥清零 → 启用成功 → 删密钥 → 缺密钥重新出现。
+- **消息不再重复（已验证）**：气泡唯一真源是 `messages`（`event.message`），`event.part` 只推进"正在输入"、
+  不累积文本；发送时的临时消息按真实 id 去重后再替换。修复前同一条回复被 `stream.parts` 与 `messages` 各画一次。
+- **单测**：新增 `plugin-secrets.test.ts` 6 例（action 归一正反、一次性 token、SecretStore 读写删、真实 manifest 声明确在）。
+
 ## 2026-10-26 验收记录（本机 Windows 11 / Node 24 / Electron 45）
 
 ```
 M0c 验收：通过（界面内逐项点击另列遗留）
 构建：shared ✅ kernel ✅ client ✅   —— npm.cmd run build 全绿
 类型：npm.cmd run typecheck          —— 0 error（shared/kernel/client 三套 tsconfig）
-单测：npm.cmd test                   —— 15 文件 / 89 用例全绿（v0.2.0 增补人设编译 9 例）
-冒烟：npm.cmd run smoke:kernel       —— 38 项全过（真起内核进程 + 命名管道）
+单测：npm.cmd test                   —— 16 文件 / 95 用例全绿（v0.2.0 人设编译 9 例 + v0.3.0 插件密钥 6 例）
+冒烟：npm.cmd run smoke:kernel       —— 45 项全过（真起内核进程 + 命名管道）
 边界：npm.cmd run lint               —— 0 violation
 插件：validate-plugins 7/7；package-check 19 通过 0 错误
-安装：NSIS 安装包约 117 MB；win-unpacked 实跑，声明闸 → 聊天 → 管理面板（11 页签）截图留证（v0.2.0 另有人格内核编译截图）
+安装：NSIS 安装包约 117 MB；win-unpacked 实跑，声明闸 → 聊天 → 管理面板（11 页签）截图留证（v0.2.0 人格内核编译、v0.3.0 插件授权与密钥截图）
 逐项：1 ✅  2 🟡 3 🟡 4 ✅  5 ✅  6 ✅  7 ✅  8 ✅
 遗留：2/3 的界面内逐项点击未做（自动化已覆盖崩溃退避与启停残留）；
       真实模型回复未验（本机无 API Key，只验证到降级回声与 token 计费链路）。
-补充：插件自动拉起与健康语义已于同日修复并实测（见上方第 9 节）。
+补充：插件自动拉起与健康语义已于同日修复并实测（见上方第 9 节）；v0.3.0 修好插件授权、密钥录入与消息重复。
 ```
 
 ## 代码同步状态
 
 - 远端：`https://github.com/rifei111/Anteros`（public，`main`）。
 - 本地与远端在同一提交上，按"初始化骨架 → 内核闭环 → 客户端三视图 → 冒烟 31 项 → 插件启动与健康修复 →
-  可编辑人格内核 + 逐条发送（v0.2.0）"推进；Release `v0.1.0`（M0c 单机闭环）与 `v0.2.0`（人格内核可编辑）均已发布。
+  可编辑人格内核 + 逐条发送（v0.2.0）→ 插件授权/密钥 + 消息去重（v0.3.0）"推进；Release `v0.1.0`（M0c 单机闭环）、
+  `v0.2.0`（人格内核可编辑）与 `v0.3.0`（插件授权与密钥、消息不重复）均已发布。
 - 2026-10-26 夜间 `github.com:443` 一度不可达（`api.github.com` 正常），本次提交经 GitHub REST 的 Git Data API
   写入（blob → tree → commit → 更新 ref），因此提交哈希与本地对象一致，工作树干净。
 

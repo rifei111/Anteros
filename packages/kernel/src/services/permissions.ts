@@ -24,6 +24,17 @@ interface TokenRow {
   used: number;
 }
 
+/**
+ * 把"同一件事的不同叫法"归一：界面按 RPC 方法名申请 token（plugins.enable），
+ * 插件宿主内部按规范里的短名消费（plugin.enable）。两者语义相同，不该因此互相拒绝。
+ */
+function normalizeConfirmAction(action: string): string {
+  const trimmed = action.trim().toLowerCase();
+  if (trimmed.startsWith("plugins.")) return `plugin.${trimmed.slice("plugins.".length)}`;
+  if (trimmed.startsWith("channels.")) return `channel.${trimmed.slice("channels.".length)}`;
+  return trimmed;
+}
+
 export class PermissionsService {
   constructor(
     private readonly db: Db,
@@ -75,7 +86,13 @@ export class PermissionsService {
     if (!row) throw new AnterosError(ERROR_CODES.ECONFIRM, "确认 token 无效，请重新确认");
     if (row.used === 1) throw new AnterosError(ERROR_CODES.ECONFIRM, "确认 token 已使用过，请重新确认");
     if (row.expires_ts < Date.now()) throw new AnterosError(ERROR_CODES.ECONFIRM, "确认 token 已过期（60 秒），请重新确认");
-    if (row.action !== action) throw new AnterosError(ERROR_CODES.ECONFIRM, `确认 token 与操作不匹配（${row.action} ≠ ${action}）`);
+    // 同一个动作在“界面（RPC 方法名）”和“宿主内部”可能叫法不同（plugins.enable / plugin.enable），
+    // 只要指向同一件事就放行，别让用户为命名差异买单。
+    if (row.action !== action && normalizeConfirmAction(row.action) !== normalizeConfirmAction(action)) {
+      throw new AnterosError(ERROR_CODES.ECONFIRM, `确认 token 与操作不匹配（${row.action} ≠ ${action}）`, {
+        hint: "重新点一次确认按钮即可；这是 token 与动作对不上，不是权限问题",
+      });
+    }
     if (target !== undefined && row.target !== null && row.target !== target) {
       throw new AnterosError(ERROR_CODES.ECONFIRM, "确认 token 与目标不匹配，请重新确认");
     }

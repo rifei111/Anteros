@@ -396,11 +396,14 @@ export class PluginHost implements PluginHostPort {
         riskLevel: "high",
         capabilities: [],
         permissions: [],
+        grantable: [],
         granted: [],
         status: "invalid",
         enabled: false,
         config: {},
         health: null,
+        secrets: [],
+        missingSecrets: [],
         issues: invalid.issues,
       });
     }
@@ -514,6 +517,38 @@ export class PluginHost implements PluginHostPort {
       return null;
     }
     return this.secrets.get(pluginId, name);
+  }
+
+  /** 录入（覆盖）插件声明要的密钥。值只进密钥库，不进日志、不回显、不落库。 */
+  setSecret(pluginId: string, name: string, value: string): void {
+    const info = this.runtimes.get(pluginId)?.info ?? this.registry.get(pluginId);
+    if (info === undefined) throw new AnterosError(ERROR_CODES.ENOTFOUND, `找不到插件：${pluginId}`);
+    if (!info.manifest.secrets.includes(name)) {
+      throw new AnterosError(ERROR_CODES.EINVALID, `插件 ${pluginId} 没有声明密钥 ${name}`, {
+        hint: `它声明的密钥是：${info.manifest.secrets.length === 0 ? "（无）" : info.manifest.secrets.join("、")}`,
+      });
+    }
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      throw new AnterosError(ERROR_CODES.EINVALID, "密钥不能为空；要清除请用「删除密钥」");
+    }
+    this.secrets.set(pluginId, name, trimmed);
+    this.event(pluginId, "info", `已录入密钥 ${name}（值不显示）`);
+    this.emitPlugin(pluginId);
+    this.emitHealth();
+  }
+
+  /** 清除插件密钥；清掉后依赖它的插件会被判 blocked，不会假装还能用。 */
+  deleteSecret(pluginId: string, name: string): void {
+    const info = this.runtimes.get(pluginId)?.info ?? this.registry.get(pluginId);
+    if (info === undefined) throw new AnterosError(ERROR_CODES.ENOTFOUND, `找不到插件：${pluginId}`);
+    if (!info.manifest.secrets.includes(name)) {
+      throw new AnterosError(ERROR_CODES.EINVALID, `插件 ${pluginId} 没有声明密钥 ${name}`);
+    }
+    this.secrets.delete(pluginId, name);
+    this.event(pluginId, "info", `已删除密钥 ${name}`);
+    this.emitPlugin(pluginId);
+    this.emitHealth();
   }
 
   async shutdown(): Promise<void> {
@@ -1359,7 +1394,16 @@ export class PluginHost implements PluginHostPort {
     const info = this.runtimes.get(row.id)?.info ?? this.registry.get(row.id);
     const manifest = info?.manifest;
     const issued = info?.issues ?? [];
-    const issues = unique([...parseJson<string[]>(row.issues, []), ...issued]);
+    // 密钥问题是"现在就能改"的活状态：每次读都按密钥库重算，别把注册时那句过期的提示一直挂着。
+    const missingSecrets = (manifest?.secrets ?? []).filter((name) => !this.secrets.has(row.id, name));
+    const stale = parseJson<string[]>(row.issues, []).filter((issue) => !issue.includes("项密钥"));
+    if (missingSecrets.length > 0) {
+      stale.push(`需要 ${missingSecrets.length} 项密钥（未录入会导致 blocked）：${missingSecrets.join("、")}`);
+    }
+    const issues = unique([
+      ...stale,
+      ...issued.filter((issue) => !issue.includes("项密钥")),
+    ]);
     if (info === undefined) issues.push("插件目录或文件已不存在，请重新安装或移除该插件");
     const status = this.effectiveStatus(row);
     return {
@@ -1372,11 +1416,14 @@ export class PluginHost implements PluginHostPort {
       riskLevel: (manifest?.riskLevel ?? row.risk_level) as PluginRisk,
       capabilities: parseJson<string[]>(row.capabilities, []),
       permissions: parseJson<string[]>(row.permissions, []),
+      grantable: unique([...parseJson<string[]>(row.capabilities, []), ...parseJson<string[]>(row.permissions, [])]),
       granted: this.grants.list(row.id),
       status,
       enabled: row.enabled === 1,
       config: parseJson<Record<string, unknown>>(row.config, {}),
       health: parseJson<PluginHealth | null>(row.health, null),
+      secrets: [...(manifest?.secrets ?? [])],
+      missingSecrets,
       issues,
       ...(row.last_error === null ? {} : { lastError: row.last_error }),
       ...(row.enabled_ts === null ? {} : { enabledTs: row.enabled_ts }),

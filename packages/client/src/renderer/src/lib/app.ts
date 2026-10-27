@@ -20,14 +20,7 @@ let started = false;
 let stopPolling: (() => void) | null = null;
 let stopEvents: (() => void) | null = null;
 let tempSequence = 0;
-let partChain: Promise<void> = Promise.resolve();
 let markReadTimer: number | null = null;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    globalThis.setTimeout(resolve, ms);
-  });
-}
 
 function nextTempId(): number {
   tempSequence += 1;
@@ -273,25 +266,15 @@ function wireEvents(): () => void {
 
   cleanups.push(
     subscribe("event.part", (payload) => {
-      partChain = partChain
-        .then(async () => {
-          const delay = Math.max(0, Math.min(payload.delayAfterMs, 10_000));
-          if (delay > 0) await sleep(delay);
-          setState((previous) => {
-            const current = previous.stream;
-            const parts = current?.parts ?? [];
-            if (payload.index < parts.length) return {};
-            return {
-              stream: {
-                turnId: payload.turnId,
-                parts: [...parts, payload.text],
-                typing: current?.typing ?? true,
-                plannedMs: current?.plannedMs ?? null,
-              },
-            };
-          });
-        })
-        .catch(() => undefined);
+      // 分条文本只走 event.message（气泡唯一真源）；这里只维持「正在输入」，
+      // 不累积任何文本，否则同一句话会被 stream.parts 与 messages 各画一遍。
+      setState((previous) => ({
+        stream: {
+          turnId: payload.turnId,
+          typing: true,
+          plannedMs: previous.stream?.plannedMs ?? null,
+        },
+      }));
     }),
   );
 
@@ -301,7 +284,6 @@ function wireEvents(): () => void {
         setState((previous) => ({
           stream: {
             turnId: previous.stream?.turnId ?? null,
-            parts: previous.stream?.parts ?? [],
             typing: true,
             plannedMs: typeof payload.plannedMs === "number" ? payload.plannedMs : null,
           },
@@ -448,13 +430,10 @@ function upsertMessage(message: ChatMessage): void {
         messages: previous.messages.map((item) => (item.id === message.id ? { ...item, ...message } : item)),
       };
     }
-    const stream = previous.stream;
-    const belongsToStream =
-      isAgent && stream !== null && stream.parts.length > 0 && (message.turnId ?? null) === stream.turnId;
     const messages = [...previous.messages, message].sort(
       (left, right) => left.ts - right.ts || left.id - right.id,
     );
-    return belongsToStream ? { messages, stream: { ...stream, parts: [] } } : { messages };
+    return { messages };
   });
 }
 
@@ -496,9 +475,17 @@ export async function sendMessage(rawText: string, quote: ChatMessage | null): P
       clientTs: temp.ts,
       presence: { isTyping: true, appFocused: document.hasFocus() },
     });
-    setState((previous) => ({
-      messages: previous.messages.map((item) => (item.id === tempId ? result.userMessage : item)),
-    }));
+    // 临时消息可能已被 event.message 的权威消息「顶替」进列表：先把 tempId 和
+    // 真实 id 都摘掉，再补回内核返回的那条，保证任何时刻列表里 id 唯一（否则同一句话两条气泡）。
+    setState((previous) => {
+      const rest = previous.messages.filter(
+        (item) => item.id !== tempId && item.id !== result.userMessage.id,
+      );
+      const messages = [...rest, result.userMessage].sort(
+        (left, right) => left.ts - right.ts || left.id - right.id,
+      );
+      return { messages };
+    });
     void markReadNow();
     return true;
   } catch (error) {

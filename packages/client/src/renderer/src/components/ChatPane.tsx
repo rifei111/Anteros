@@ -145,7 +145,6 @@ export function ChatPane() {
   const presence = state.world?.presence ?? null;
   const stage = state.relation?.stage ?? null;
   const typing = state.stream?.typing === true;
-  const streamParts = state.stream?.parts ?? [];
   const plannedMs = state.stream?.plannedMs ?? null;
 
   return (
@@ -219,15 +218,6 @@ export function ChatPane() {
         ) : null}
 
         {nodes}
-
-        {streamParts.map((text, index) => (
-          <div className="msg-row msg-agent" key={`stream-${index}-${text.slice(0, 6)}`}>
-            <div className="avatar avatar-agent">{agentInitial}</div>
-            <div className="msg-col">
-              <div className="bubble bubble-agent stream-bubble">{text}</div>
-            </div>
-          </div>
-        ))}
 
         {typing ? (
           <div className="msg-row msg-agent">
