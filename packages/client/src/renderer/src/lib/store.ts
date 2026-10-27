@@ -25,6 +25,7 @@ import type {
   WorldState,
 } from "@anteros/shared";
 import type { ConnectionInfo } from "./kernel";
+import type { UpdateStatusView } from "../../../common/protocol";
 
 export type Phase = "connecting" | "consent" | "onboarding" | "ready";
 
@@ -39,6 +40,7 @@ export type AdminTab =
   | "cost"
   | "model"
   | "advanced"
+  | "update"
   | "data";
 
 /**
@@ -94,6 +96,8 @@ export interface AppState {
   plugins: PluginInfo[];
   /** 插件运行环境状态：key 是 pluginId（`event.runtime` 与 `plugins.runtime.*` 都写这里） */
   pluginRuntime: Record<string, PluginRuntimeStatus>;
+  /** 应用内更新状态（主进程推、界面只读）。 */
+  updateStatus: UpdateStatusView | null;
   channels: ChannelInfo[];
   messages: ChatMessage[];
   hasMoreHistory: boolean;
@@ -133,6 +137,7 @@ const initialState: AppState = {
   cost: null,
   plugins: [],
   pluginRuntime: {},
+  updateStatus: null,
   channels: [],
   messages: [],
   hasMoreHistory: false,
@@ -178,6 +183,14 @@ export function useAppState(): AppState {
 /* 插件运行环境                                                        */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* 应用内更新（软件整体）                                              */
+/* ------------------------------------------------------------------ */
+
+/** 主进程推来的更新状态：原样落到 store，界面只读；不做乐观更新。 */
+export function applyUpdateStatus(status: UpdateStatusView): void {
+  setState({ updateStatus: status });
+}
 /** 写入一条运行环境状态：`event.runtime` 推送与 RPC 返回值共走这一条路。 */
 export function applyPluginRuntime(status: PluginRuntimeStatus): void {
   setState((previous) => ({

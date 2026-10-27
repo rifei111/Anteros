@@ -48,6 +48,12 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: { index: resolve(__dirname, "src/renderer/index.html") },
+        // zod（经由 @anteros/shared 打进渲染层）会触发一类 Rollup 无法解释的注释告警，
+        // 它只是"某条注释会被去掉"，不影响产物；这里静音掉，免得每次构建都刷一屏红字。
+        onwarn(warning, defaultHandler) {
+          if (warning.code === "INVALID_ANNOTATION") return;
+          defaultHandler(warning);
+        },
       },
     },
   },

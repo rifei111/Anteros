@@ -240,6 +240,8 @@ function checkInstaller() {
     warn("安装包体积偏小", "小于 20 MB，可能缺少内核/插件资源；确认 extraResources 是否打进包内");
   }
 
+  checkUpdateArtifacts(releaseDir, installer);
+
   const winUnpacked = path.join(releaseDir, "win-unpacked");
   if (exists(winUnpacked)) {
     checkUnpacked(winUnpacked);
@@ -266,6 +268,60 @@ function checkUnpacked(winUnpacked) {
     (needle) => exists(path.join(resources, ...needle.split("/"))),
     "release/win-unpacked",
   );
+}
+
+/**
+ * 应用内更新产物自检（electron-updater 依赖三件套）：
+ * latest.yml（版本 + 文件名 + sha512）、安装包的 .blockmap（差分更新基础）、resources/app-update.yml（运行期读取的发布源）。
+ */
+function checkUpdateArtifacts(releaseDir, installer) {
+  const latest = path.join(releaseDir, "latest.yml");
+  if (!exists(latest)) {
+    err("latest.yml 缺失", "electron-updater 靠它判断新版本；确认 electron-builder.yml 里有 publish（github）配置后重新打包");
+    return;
+  }
+  const text = readText(latest) ?? "";
+  const version = (text.match(/^version:\s*(.+)$/m)?.[1] ?? "").trim().replace(/^['"]|['"]$/g, "");
+  const filePath = (text.match(/^path:\s*(.+)$/m)?.[1] ?? "").trim().replace(/^['"]|['"]$/g, "");
+  const sha512 = (text.match(/^sha512:\s*(.+)$/m)?.[1] ?? "").trim();
+  const installerName = path.basename(installer);
+
+  if (!version) err("latest.yml 缺少 version 字段", rel(latest));
+  else ok("latest.yml 版本", version);
+  if (!filePath) err("latest.yml 缺少 path 字段", rel(latest));
+  else if (path.basename(filePath) !== installerName) {
+    // 允许 release 目录里同时躺着旧版安装包：只有最新那个才该被 latest.yml 指向
+    err(
+      "latest.yml 的 path 与最新安装包不一致",
+      `latest.yml 指向 ${filePath}，但 release 里最新的安装包是 ${installerName}；先清掉旧安装包或重新打包`,
+    );
+  } else ok("latest.yml 指向当前安装包", filePath);
+  if (!sha512) err("latest.yml 缺少 sha512", "没有校验值的更新包不会被安装器接受");
+  else if (sha512.length < 40) warn("latest.yml 的 sha512 看起来太短", `长度 ${sha512.length}`);
+  else ok("latest.yml 带 sha512 校验", `${sha512.slice(0, 16)}…`);
+
+  const expectedVersioned = `Anteros-Setup-${version}-x64.exe`;
+  if (version && installerName !== expectedVersioned) {
+    warn("安装包文件名与 latest.yml 版本不一致", `期望 ${expectedVersioned}，实际 ${installerName}`);
+  }
+
+  const blockmap = `${installer}.blockmap`;
+  if (exists(blockmap)) ok("差分更新 blockmap 存在", path.basename(blockmap));
+  else err("缺少 .blockmap", "没有它 electron-updater 只能整包下载，增量更新失效");
+
+  const appUpdateYml = path.join(releaseDir, "win-unpacked", "resources", "app-update.yml");
+  if (!exists(path.join(releaseDir, "win-unpacked"))) {
+    warn("跳过 app-update.yml 检查", "没有 release/win-unpacked");
+  } else if (exists(appUpdateYml)) {
+    const cfg = readText(appUpdateYml) ?? "";
+    const provider = (cfg.match(/^provider:\s*(.+)$/m)?.[1] ?? "").trim();
+    const owner = (cfg.match(/^owner:\s*(.+)$/m)?.[1] ?? "").trim();
+    const repo = (cfg.match(/^repo:\s*(.+)$/m)?.[1] ?? "").trim();
+    if (!provider || !owner || !repo) err("app-update.yml 字段不全", `provider=${provider || "?"} owner=${owner || "?"} repo=${repo || "?"}`);
+    else ok("app-update.yml 发布源", `${provider}:${owner}/${repo}`);
+  } else {
+    err("缺少 resources/app-update.yml", "打包时没生成更新配置，应用内检查更新会永远失败");
+  }
 }
 
 function checkInstallerEntries(predicate, where) {

@@ -204,3 +204,39 @@ M0c 验收：通过（界面内逐项点击另列遗留）
 - 2026-10-26 夜间 `github.com:443` 一度不可达（`api.github.com` 正常），本次提交经 GitHub REST 的 Git Data API
   写入（blob → tree → commit → 更新 ref），因此提交哈希与本地对象一致，工作树干净。
 
+
+## 14. v0.6.0 增补
+
+### 14.1 应用内更新（已验证）
+
+- 管理面板新增「更新」页签（12 个页签）：检查更新 / 下载（进度、速度、大小）/ 重启并安装 / 出错重试 / 四条说明。
+- 能力全部在主进程（`packages/client/src/main/updater.ts`），渲染层只发 IPC：`status` / `check` / `download` / `install`。
+- `autoDownload=false`、`autoInstallOnAppQuit=true`、`allowPrerelease=false`：发现新版本不自动下、不静默装。
+- 差分下载靠 NSIS blockmap；`previousBlockmapBaseUrlOverride` 让 GitHub 源指向上一版的下载目录，否则找不到旧 blockmap 只能整包下。
+- electron-updater 内部日志落盘 `<userData>/updater.log`（`autoUpdater.logger` 四个方法 appendFileSync）。
+
+实测记录（2026-10-27，本机本地更新源 + 0.6.0 安装包）：
+
+```
+Full: 120,249.54 KB, To download: 1,840.3 KB (2%)
+New version 0.6.1 has been downloaded to ...\pending\Anteros-Setup-0.6.1-x64.exe
+```
+
+- 结论：差分生效，只下 2% 的字节；pending 目录里是完整的 0.6.1 安装包（123,135,528B）。
+- 差分失败路径也验过：更新源不支持 `multipart/byteranges` 时报
+  `Cannot download differentially, fallback to full download: Error: Content-Type "multipart/byteranges" is expected...`，
+  随后自动回退整包下载并成功——**降级是安全的，sha512 仍会校验**。
+- 自检口子：`ANTEROS_SMOKE_UPDATE=check|download`（走真实 IPC 链路）、`ANTEROS_SMOKE_REPORT=<json>`（把更新状态与管理面板文本落盘，供无截图核对）。
+- 注意：自检时必须截图后立刻杀进程，`autoInstallOnAppQuit` 会让它真的装上新版本。
+
+### 14.2 下载运行环境后插件就绪（已验证）
+
+- 内核给插件注入 `ANTEROS_PLUGIN_RUNTIME_DIR` / `ANTEROS_PLUGIN_RUNTIME_VERSION`（值取插件 config 里的 `runtimePath`/`runtimeVersion`）。
+- 启用前多一道闸：manifest 声明 `runtimeEnv: true` 但运行环境没装时 `EBLOCKED`「这个插件要先下载运行环境」。
+- 插件启用后立刻体检一次（`await runHealthCheck`），不等 30s 周期。
+- `channel.wechat-replica` 的 `plugin.health.check` 区分五种情形（无/坏/空/缺/就绪），就绪时回
+  `适配器骨架已就绪（运行环境 vX，N 个条目）；尚未接入微信本体，收发消息仍会诚实拒绝。`
+- 通道列表新增 `attachments` 语义：`channel.write` 只表示「被允许」，`writeReady` 还要求插件体检回 `attachments.write === true`——骨架≠接通，界面不会假装它是可写通道。
+- 界面：插件卡片里「下载运行环境并启用」一键走完 安装 → 授权 → 启用；只下载不启用也行。
+
+冒烟覆盖：第 18 组（装运行环境 → 启用 → `health.ok` → 文案含「骨架已就绪」「未接入」→ `channels.list` 里 `writeReady === false`）。

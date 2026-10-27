@@ -1,6 +1,6 @@
 {
   "name": "@anteros/kernel",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "main": "./dist/kernel.mjs",
@@ -9,7 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@anteros/shared": "0.1.0",
+    "@anteros/shared": "*",
     "zod": "^4.1.12"
   },
   "devDependencies": {

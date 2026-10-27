@@ -487,6 +487,7 @@ export function PluginsTab() {
                           loadError={runtimeErrors[plugin.id] ?? null}
                           canEdit={isOwner}
                           onReloadStatus={() => loadRuntimeStatus(plugin.id)}
+                          onPluginsChanged={() => loaded.reload()}
                         />
                       </td>
                     </tr>

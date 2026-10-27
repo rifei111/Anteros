@@ -12,6 +12,7 @@ import { OwnerTab } from "./tabs/OwnerTab";
 import { PersonaTab } from "./tabs/PersonaTab";
 import { PluginsTab } from "./tabs/PluginsTab";
 import { ProactiveTab } from "./tabs/ProactiveTab";
+import { UpdateTab } from "./tabs/UpdateTab";
 
 const TABS: ReadonlyArray<{ id: AdminTab; label: string }> = [
   { id: "owner", label: "Owner" },
@@ -24,6 +25,7 @@ const TABS: ReadonlyArray<{ id: AdminTab; label: string }> = [
   { id: "cost", label: "成本" },
   { id: "model", label: "模型" },
   { id: "advanced", label: "高级" },
+  { id: "update", label: "更新" },
   { id: "data", label: "数据" },
 ];
 
@@ -49,6 +51,8 @@ function renderTab(tab: AdminTab) {
       return <ModelTab />;
     case "advanced":
       return <AdvancedTab />;
+    case "update":
+      return <UpdateTab />;
     case "data":
       return <DataTab />;
   }

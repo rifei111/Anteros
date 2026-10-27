@@ -24,6 +24,15 @@ export const IPC_CHANNEL = {
   quitApp: "anteros:quit-app",
 } as const;
 
+/** 应用内更新：主进程 ↔ 渲染进程的独立通道（不走内核，更新与内核无关）。 */
+export const UPDATE_EVENT_CHANNEL = "app.update.event";
+export const UPDATE_METHODS = {
+  status: "app.update.status",
+  check: "app.update.check",
+  download: "app.update.download",
+  install: "app.update.install",
+} as const;
+
 /** 与 packages/shared/src/version.ts 保持一致。 */
 export const PIPE_PREFIX = "anteros-kernel";
 export const DATA_DIR_NAME = "anteros-data";
@@ -47,8 +56,30 @@ export interface IpcSuccess<T> {
 
 export type IpcResult<T> = IpcSuccess<T> | IpcFailure;
 
+/** 更新状态：主进程算，渲染层只显示。字段与 src/main/updater.ts 的 UpdateStatus 一致。 */
+export interface UpdateStatusView {
+  state: "idle" | "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error";
+  currentVersion: string;
+  version?: string;
+  releaseNotes?: string;
+  percent?: number;
+  bytesPerSecond?: number;
+  total?: number;
+  message?: string;
+  checkedTs?: number;
+  busy?: boolean;
+}
+
 /** 渲染进程可订阅的额外客户端桥能力（在 ClientBridge 之上）。 */
 export interface ExtendedClientBridge extends ClientBridge {
   /** 退出整个应用（声明闸「我不接受，退出」使用） */
   quitApp(): Promise<void>;
+  /** 应用内更新（检查 / 下载 / 重启安装 / 订阅状态） */
+  updates: {
+    status(): Promise<UpdateStatusView | null>;
+    check(): Promise<UpdateStatusView | null>;
+    download(): Promise<UpdateStatusView | null>;
+    install(): Promise<UpdateStatusView | null>;
+    onEvent(handler: (status: UpdateStatusView) => void): () => void;
+  };
 }

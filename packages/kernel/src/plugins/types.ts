@@ -80,6 +80,11 @@ export interface CanEnableContext {
   grants: string[];
   missingSecrets: string[];
   consent: { ok: boolean; consentVersion: string | null };
+  /**
+   * 需要外部运行环境的插件（v0.5+）：没装运行环境时不许启用，
+   * 否则会先拉起一个注定 blocked 的进程，用户看到的就是「点了启用没反应」。
+   */
+  runtime?: { required: boolean; installed: boolean };
 }
 
 export type CanEnableResult = { ok: true } | { ok: false; code: ErrorCode; reason: string };

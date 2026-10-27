@@ -14,9 +14,11 @@
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 import { mkdir, writeFile } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { IPC_CHANNEL, type IpcResult } from "../common/protocol";
+import { IPC_CHANNEL, UPDATE_EVENT_CHANNEL, UPDATE_METHODS, type IpcResult } from "../common/protocol";
 import { KernelCallError, KernelClient } from "./kernel-client";
+import { AppUpdater, type UpdateStatus } from "./updater";
 
 const WINDOW_WIDTH = 1180;
 const WINDOW_HEIGHT = 780;
@@ -32,6 +34,11 @@ const MIN_WINDOW_HEIGHT = 640;
  * - `ANTEROS_SMOKE_SKIP_CONSENT=1`：仅用于 consent 视图——声明闸未过也照常截图，不勾选、不绕过闸。
  */
 type SmokeView = "consent" | "chat" | "admin";
+/** 自检用：把面板可见文本与更新状态写成 JSON，方便无头核对（截图看不了时靠它）。 */
+const SMOKE_REPORT_PATH = (process.env.ANTEROS_SMOKE_REPORT ?? "").trim();
+
+/** 自检用：`check` 只检查更新，`download` 检查并真的下载（验证增量更新链路）。 */
+const SMOKE_UPDATE = (process.env.ANTEROS_SMOKE_UPDATE ?? "").trim();
 const SMOKE_SCREENSHOT_PATH =
   typeof process.env.ANTEROS_SMOKE_SCREENSHOT === "string" && process.env.ANTEROS_SMOKE_SCREENSHOT.length > 0
     ? process.env.ANTEROS_SMOKE_SCREENSHOT
@@ -69,6 +76,7 @@ if (process.platform === "win32") {
 
 let mainWindow: BrowserWindow | null = null;
 let kernel: KernelClient | null = null;
+let updater: AppUpdater | null = null;
 let quitting = false;
 
 function toFailure(error: unknown): IpcResult<never> {
@@ -94,6 +102,34 @@ function broadcast(method: string, params: unknown): void {
     if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
     window.webContents.send(IPC_CHANNEL.event, method, params);
   }
+}
+
+/** 更新状态推给所有窗口（不含窗口句柄，避免窗口销毁后报错）。 */
+function broadcastUpdate(status: UpdateStatus): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
+    window.webContents.send(UPDATE_EVENT_CHANNEL, status);
+  }
+}
+
+function registerUpdaterHandlers(): void {
+  ipcMain.handle(UPDATE_METHODS.status, () => updater?.getStatus() ?? null);
+  ipcMain.handle(UPDATE_METHODS.check, async () => (updater ? await updater.check() : null));
+  ipcMain.handle(UPDATE_METHODS.download, async () => (updater ? await updater.download() : null));
+  ipcMain.handle(UPDATE_METHODS.install, () => updater?.install() ?? null);
+}
+
+/** 启动时建更新器：它只读 resources/app-update.yml（打包后）或 ANTEROS_UPDATE_FEED（联调）。 */
+function startUpdater(): void {
+  if (updater) return;
+  const feedUrl = (process.env.ANTEROS_UPDATE_FEED ?? "").trim();
+  updater = new AppUpdater({
+    onStatus: (status) => broadcastUpdate(status),
+    feedUrl: feedUrl.length > 0 ? feedUrl : null,
+    logFile: join(app.getPath("userData"), "updater.log"),
+  });
+  updater.init();
+  registerUpdaterHandlers();
 }
 
 function registerIpcHandlers(client: KernelClient): void {
@@ -492,7 +528,67 @@ async function sendSmokeMessage(window: BrowserWindow): Promise<void> {
   await sleep(12_000);
 }
 
-function scheduleSmokeScreenshot(window: BrowserWindow): void {  const targetPath = SMOKE_SCREENSHOT_PATH;
+/**
+ * 自检用：走一遍真实的应用内更新（检查 → 下载），把状态打到日志。
+ * 不装、不重启：安装那一步必须由人点，这里只证明「能查到新版并下载下来」。
+ */
+async function driveUpdateFlow(window: BrowserWindow): Promise<void> {
+  if (SMOKE_UPDATE !== "check" && SMOKE_UPDATE !== "download") return;
+  const checked = await scriptInPage(
+    window,
+    `(async () => {
+      const api = window.anteros && window.anteros.updates;
+      if (!api) return { ok: false, message: "页面里没有更新桥" };
+      const status = await api.check();
+      return {
+        ok: true,
+        state: status ? status.state : null,
+        version: status ? status.version : null,
+        current: status ? status.currentVersion : null,
+        message: status ? status.message : null,
+      };
+    })()`,
+  );
+  console.warn(`[anteros] 自检·检查更新：${JSON.stringify(checked)}`);
+  await sleep(1_500);
+  if (SMOKE_UPDATE !== "download") return;
+
+  await scriptInPage(
+    window,
+    `(async () => {
+      const api = window.anteros && window.anteros.updates;
+      if (!api) return false;
+      await api.download();
+      return true;
+    })()`,
+  );
+
+  const deadline = Date.now() + 180_000;
+  let last = "";
+  while (Date.now() < deadline) {
+    const status = await scriptInPage(
+      window,
+      `(async () => {
+        const api = window.anteros && window.anteros.updates;
+        const status = api ? await api.status() : null;
+        return status
+          ? { state: status.state, percent: status.percent, version: status.version, message: status.message, transferred: status.transferred, total: status.total }
+          : null;
+      })()`,
+    );
+    const line = JSON.stringify(status);
+    if (line !== last) {
+      console.warn(`[anteros] 自检·下载更新：${line}`);
+      last = line;
+    }
+    const state = (status as { state?: string } | null)?.state;
+    if (state === "downloaded" || state === "error" || state === "not-available") return;
+    await sleep(1_000);
+  }
+  console.warn("[anteros] 自检·下载更新：等待超时");
+}
+function scheduleSmokeScreenshot(window: BrowserWindow): void {
+  const targetPath = SMOKE_SCREENSHOT_PATH;
   if (!targetPath) return;
   if (SMOKE_VIEW === "consent" && SMOKE_SKIP_CONSENT) {
     console.warn("[anteros] 自检模式：声明闸未过也照常截图（不勾选，也不绕过声明闸本身）");
@@ -502,10 +598,13 @@ function scheduleSmokeScreenshot(window: BrowserWindow): void {  const targetPat
       try {
         if (SMOKE_VIEW !== "consent") {
           await driveToChat(window);
-          if (SMOKE_VIEW === "admin") await openAdminPanel(window);
-          else await sendSmokeMessage(window);
+          if (SMOKE_VIEW === "admin") {
+            await openAdminPanel(window);
+            await driveUpdateFlow(window);
+          } else await sendSmokeMessage(window);
         }
         await sleep(SMOKE_SETTLE_MS);
+        await writeSmokeReport(window);
         await captureSmokeScreenshot(window, targetPath);
       } catch (error) {
         console.error("[anteros] 自检流程失败，仍尝试截图：", error);
@@ -522,6 +621,28 @@ function scheduleSmokeScreenshot(window: BrowserWindow): void {  const targetPat
   timer.unref();
 }
 
+/** 自检用：把当前面板文本与更新状态落盘，便于在没有图形界面时核对结果。 */
+async function writeSmokeReport(window: BrowserWindow): Promise<void> {
+  if (!SMOKE_REPORT_PATH) return;
+  try {
+    const report = await scriptInPage(
+      window,
+      `(async () => {
+        const api = window.anteros && window.anteros.updates;
+        const status = api ? await api.status() : null;
+        const panel = document.querySelector(".admin-panel");
+        return {
+          updateStatus: status,
+          panelText: (panel ? panel.innerText : document.body.innerText || "").slice(0, 4000),
+        };
+      })()`,
+    );
+    writeFileSync(SMOKE_REPORT_PATH, JSON.stringify(report, null, 2), "utf8");
+    console.warn(`[anteros] 自检报告已写：${SMOKE_REPORT_PATH}`);
+  } catch (error) {
+    console.error("[anteros] 自检报告失败:", error);
+  }
+}
 function quitGracefully(exitCode: number): void {
   if (quitting) return;
   quitting = true;
@@ -567,6 +688,7 @@ if (!gotLock) {
     });
 
     registerIpcHandlers(client);
+    startUpdater();
 
     mainWindow = createWindow();
     client.start();

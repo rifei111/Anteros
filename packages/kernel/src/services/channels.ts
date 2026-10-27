@@ -110,11 +110,13 @@ function riskToCapability(risk: PluginInfo["riskLevel"]): ChannelCapabilities["r
 
 function capabilitiesOf(info: PluginInfo): ChannelCapabilities {
   const declared = new Set(info.capabilities);
+  // 能力声明只说明"被允许做什么"，"现在能不能写"要插件自己报（骨架≠接通）。
+  const attached = info.health?.attachments ?? {};
   return {
-    readCanBackfill: declared.has("channel.read"),
-    writeIsDeterministic: declared.has("channel.write"),
-    typingIsReal: false,
-    canRecall: false,
+    readCanBackfill: declared.has("channel.read") && attached.read === true,
+    writeIsDeterministic: declared.has("channel.write") && attached.write === true,
+    typingIsReal: attached.typing === true,
+    canRecall: attached.recall === true,
     hostOccupancyMs: 0,
     riskLevel: riskToCapability(info.riskLevel),
   };

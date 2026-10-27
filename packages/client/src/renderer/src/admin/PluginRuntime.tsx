@@ -12,8 +12,9 @@ import { humanizeError } from "../lib/errors";
 import { formatBytes, formatDateTime } from "../lib/format";
 import { invoke } from "../lib/kernel";
 import { applyPluginRuntime, pushToast, setRuntimeFeedUrl } from "../lib/store";
+import { describePermission, requestToken } from "./helpers";
 
-type RuntimeAction = "check" | "install" | "uninstall";
+type RuntimeAction = "check" | "install" | "uninstall" | "prepare";
 
 /** 与内核侧校验一致：更新源只接受 https / file，不合法连请求都不发。 */
 const FEED_URL_PATTERN = /^(https:\/\/|file:\/\/)/i;
@@ -43,6 +44,7 @@ function busyText(status: PluginRuntimeStatus | null, pending: RuntimeAction | n
   if (pending === "check") return "正在检查更新…";
   if (pending === "install") return "正在准备下载…";
   if (pending === "uninstall") return "正在卸载…";
+  if (pending === "prepare") return "正在准备（下载 → 授权 → 启用）…";
   return "";
 }
 
@@ -69,6 +71,8 @@ export interface PluginRuntimePanelProps {
   loadError: string | null;
   canEdit: boolean;
   onReloadStatus: () => void;
+  /** 授权/启用之后要让插件列表重拉一次（enabled/status 变了） */
+  onPluginsChanged: () => void;
 }
 
 /**
@@ -81,6 +85,7 @@ export function PluginRuntimePanel({
   loadError,
   canEdit,
   onReloadStatus,
+  onPluginsChanged,
 }: PluginRuntimePanelProps) {
   const confirm = useConfirm();
   const [pending, setPending] = useState<RuntimeAction | null>(null);
@@ -145,6 +150,89 @@ export function PluginRuntimePanel({
     await run("uninstall");
   };
 
+  /** 这个插件还缺哪些授权（manifest 声明的 grantable 里没授的）。 */
+  const missingGrants = (): string[] => {
+    const options = plugin.grantable.length > 0 ? plugin.grantable : plugin.permissions;
+    return options.filter((item) => !plugin.granted.includes(item));
+  };
+
+  /**
+   * 「下载并启用」：一次点击把三件事串起来 —— 装运行环境 → 补齐授权 → 启用插件。
+   *
+   * 为什么串在一起：单独装运行环境之后，插件仍然是 disabled / blocked，
+   * 用户看到的是「下载完了但插件没就绪」。这里的顺序是硬的：先有运行环境，
+   * 启用闸才不拦；先授权，通道写能力才放行；最后才拉起进程。
+   *
+   * 授权与启用都要 confirm.token（高危），所以整条链只用这一个确认框兜底，
+   * 但确认框里会把「将授予哪些能力」逐条列出来 —— 不能变成静默授权。
+   */
+  const prepareAndEnable = async (): Promise<void> => {
+    if (active) return;
+    const missing = missingGrants();
+    const needsRuntime = installed === null;
+    const agreed = await confirm.ask({
+      title: needsRuntime ? `下载运行环境并启用「${plugin.name}」？` : `授权并启用「${plugin.name}」？`,
+      body: (
+        <div>
+          {needsRuntime ? (
+            <p>
+              会先下载这个插件需要的外部运行环境（Anteros 不内置），校验通过后落到本机数据目录，然后启用插件。
+            </p>
+          ) : null}
+          {missing.length > 0 ? (
+            <>
+              <p>将授予它这些能力（随时可以逐项撤销）：</p>
+              <ul className="bullet-list">
+                {missing.map((item) => (
+                  <li key={item}>{describePermission(item)}</li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+          <p>启用后插件会作为独立子进程运行。它此刻只是「骨架就绪」，还没有接入微信本体，收发消息仍会被拒绝。</p>
+          <p className="muted">不会注入、不会改第三方程序、不会读取微信进程内存。</p>
+        </div>
+      ),
+      confirmLabel: needsRuntime ? "下载并启用" : "授权并启用",
+      danger: true,
+    });
+    if (!agreed) return;
+
+    setPending("prepare");
+    setActionError(null);
+    try {
+      if (needsRuntime) {
+        const next = await invoke("plugins.runtime.install", { id: plugin.id });
+        applyPluginRuntime(next);
+      }
+      if (missing.length > 0) {
+        const grantToken = await requestToken("plugins.grant", plugin.id);
+        await invoke(
+          "plugins.grant",
+          grantToken === undefined
+            ? { id: plugin.id, permissions: missing }
+            : { id: plugin.id, permissions: missing, confirmToken: grantToken },
+        );
+      }
+      const enableToken = await requestToken("plugins.enable", plugin.id);
+      await invoke(
+        "plugins.enable",
+        enableToken === undefined ? { id: plugin.id } : { id: plugin.id, confirmToken: enableToken },
+      );
+      pushToast(
+        "success",
+        needsRuntime ? "运行环境已就绪，插件已启用" : "插件已启用",
+        `${plugin.name} · 适配器骨架在跑，但还没有接入微信本体`,
+      );
+      onPluginsChanged();
+      onReloadStatus();
+    } catch (error) {
+      setActionError({ action: "prepare", message: messageOf(error) });
+    } finally {
+      setPending(null);
+    }
+  };
+
   const toggleFeed = (): void => {
     if (feedOpen) {
       setFeedOpen(false);
@@ -206,14 +294,24 @@ export function PluginRuntimePanel({
         <>
           {installed === null ? (
             <>
-              <div className="plugin-runtime-hint">这个插件需要一份外部运行环境，Anteros 不内置。</div>
+              <div className="plugin-runtime-hint">
+                这个插件需要一份外部运行环境，Anteros 不内置。点下面的按钮会一次做完：下载 → 校验 → 授权 → 启用。
+              </div>
               <div className="plugin-runtime-actions">
                 <button
                   className="btn btn-sm btn-primary"
                   disabled={locked}
-                  onClick={() => void run("install")}
+                  onClick={() => void prepareAndEnable()}
                 >
-                  下载运行环境
+                  下载运行环境并启用
+                </button>
+                <button
+                  className="btn btn-sm btn-ghost"
+                  disabled={locked}
+                  onClick={() => void run("install")}
+                  title="只下载，不授权也不启用"
+                >
+                  只下载
                 </button>
               </div>
             </>
@@ -231,6 +329,16 @@ export function PluginRuntimePanel({
               <div className="plugin-runtime-path mono" title={installed.path}>
                 {installed.path}
               </div>
+              {!plugin.enabled ? (
+                <div className="plugin-runtime-ready">
+                  <span>
+                    运行环境已就绪，但插件还没启用 —— 现在就启用它会拉起适配器骨架（仍然不会连接微信本体）。
+                  </span>
+                  <button className="btn btn-sm btn-primary" disabled={locked} onClick={() => void prepareAndEnable()}>
+                    授权并启用
+                  </button>
+                </div>
+              ) : null}
               {updateAvailable && available !== null ? (
                 <div className="plugin-runtime-update">
                   可更新到 v{available.version}（约 {formatBytes(available.size)}）
@@ -270,7 +378,8 @@ export function PluginRuntimePanel({
                 disabled={locked}
                 onClick={() => {
                   setActionError(null);
-                  void run(retryAction);
+                  if (retryAction === "prepare") void prepareAndEnable();
+                  else void run(retryAction);
                 }}
               >
                 重试

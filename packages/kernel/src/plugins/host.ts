@@ -280,13 +280,25 @@ const DEFAULT_CRASH_BACKOFF_MS: readonly number[] = [1_000, 5_000, 30_000];
 /** 默认启用闸：声明闸 + 密钥齐全 + 写能力必须先有租约授权。 */
 export function defaultCanEnable(
   manifest: ParsedPluginManifest,
-  context: { grants: string[]; missingSecrets: string[]; consent: { ok: boolean; consentVersion: string | null } },
+  context: {
+    grants: string[];
+    missingSecrets: string[];
+    consent: { ok: boolean; consentVersion: string | null };
+    runtime?: { required: boolean; installed: boolean };
+  },
 ): CanEnableResult {
   if (!context.consent.ok) {
     return {
       ok: false,
       code: ERROR_CODES.ECONSENT,
       reason: "需要先阅读并逐条同意《用户声明与风险告知》后才能启用插件",
+    };
+  }
+  if (context.runtime !== undefined && context.runtime.required && !context.runtime.installed) {
+    return {
+      ok: false,
+      code: ERROR_CODES.EBLOCKED,
+      reason: "这个插件要先下载运行环境（插件页里的「下载运行环境」），否则启用后只能停在 blocked",
     };
   }
   if (context.missingSecrets.length > 0) {
@@ -429,6 +441,10 @@ export class PluginHost implements PluginHostPort {
       grants: this.grants.list(pluginId),
       missingSecrets: manifest.secrets.filter((name) => !this.secrets.has(pluginId, name)),
       consent: await this.ports.consent.check(),
+      runtime: {
+        required: manifest.runtimeEnv === true,
+        installed: typeof parseJson<Record<string, unknown>>(this.row(pluginId)?.config, {}).runtimePath === "string",
+      },
     });
     if (!verdict.ok) {
       // 声明闸没过只是"还没到能启用的时机"，不是用户把它关了：
@@ -778,6 +794,14 @@ export class PluginHost implements PluginHostPort {
     this.emitHealth();
     this.startHealthLoop(rt);
     this.scheduleStableReset(rt);
+    // 握手完立刻体检一次：否则「插件详情」会一直显示「握手成功」，
+    // 要等到下一个体检周期（默认 30s）才变成真实状态，用户会以为插件没就绪。
+    // 这里等待它完成，好让「启用」这个调用返回的 PluginInfo 带的是真实健康状态。
+    try {
+      await this.runHealthCheck(rt);
+    } catch (error) {
+      this.log.warn(`插件 ${id} 首次体检失败：${errorText(error)}`);
+    }
   }
 
   /** 停用：拒新调用 → 等在途 → 通知插件还原（写能力）→ 强杀 → 记录。返回 restored。 */
@@ -870,6 +894,13 @@ export class PluginHost implements PluginHostPort {
     env.ANTEROS_DATA_DIR = pluginDataDir;
     env.ANTEROS_PLUGINS_DIR = this.registry.pluginsDir;
     env.ANTEROS_KERNEL_API = KERNEL_API_VERSION;
+    // 运行环境（v0.5+）：插件自己不能读 plugins 表的 config，宿主把落盘路径用环境变量递给它。
+    // 没有运行环境时这两项等于空串，插件据此判断「要不要先下载」而不是盲猜。
+    const pluginConfig = parseJson<Record<string, unknown>>(this.row(id)?.config, {});
+    const runtimePath = typeof pluginConfig.runtimePath === "string" ? pluginConfig.runtimePath : "";
+    const runtimeVersion = typeof pluginConfig.runtimeVersion === "string" ? pluginConfig.runtimeVersion : "";
+    env.ANTEROS_PLUGIN_RUNTIME_DIR = runtimePath;
+    env.ANTEROS_PLUGIN_RUNTIME_VERSION = runtimeVersion;
     Object.assign(env, this.secrets.envFor(id, secretNames));
     return env;
   }

@@ -93,7 +93,14 @@ function channelInfo(overrides: Partial<PluginInfo> = {}): PluginInfo {
     status: "running",
     enabled: true,
     config: {},
-    health: { ok: true, status: "ok", message: "healthy", checkedTs: Date.now() },
+    // 通道插件用 health.attachments 报「真的接上了吗」，这里模拟一个已接上的通道。
+    health: {
+      ok: true,
+      status: "ok",
+      message: "healthy",
+      checkedTs: Date.now(),
+      attachments: { read: true, write: true },
+    },
     issues: [],
     ...overrides,
   };
@@ -290,6 +297,17 @@ describe("list()：内置 App 通道 + 能力推导", () => {
     expect(readonly?.capabilities.writeIsDeterministic).toBe(false);
     expect(readonly?.capabilities.riskLevel).toBe("none");
     expect(readonly?.writeReady).toBe(false);
+
+    // 只声明了 channel.write、但插件自己没报 attachments.write（骨架尚未接上本体）：不算可写通道。
+    const declaredOnly = channelInfo({
+      id: "test.declared",
+      name: "光声明没接上",
+      health: { ok: true, status: "ok", message: "骨架已就绪，未接入", checkedTs: Date.now() },
+    });
+    const declaredList = openHarness([channelInfo(), declaredOnly]).service.list();
+    const declared = declaredList.find((item) => item.pluginId === "test.declared");
+    expect(declared?.capabilities.writeIsDeterministic).toBe(false);
+    expect(declared?.writeReady).toBe(false);
 
     const off = list.find((item) => item.pluginId === "test.off");
     expect(off?.enabled).toBe(false);

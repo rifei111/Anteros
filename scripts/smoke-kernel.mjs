@@ -401,9 +401,15 @@ try {
     confirmToken: wechatGrantToken.token,
   });
   check("高危通道按 grantable 授权（含 channel.lease）", grantedWechat.granted.includes("channel.lease"));
-  const enableToken = await call("confirm.token", { action: "plugins.enable", target: wechat.id });
-  const enabledWechat = await call("plugins.enable", { id: wechat.id, confirmToken: enableToken.token });
-  check("高危通道用界面叫法的 token 也能启用", enabledWechat.enabled === true, `status=${enabledWechat.status}`);
+  // v0.6 起：需要外部运行环境的插件，没装运行环境时启用闸直接拦下来（而不是拉起一个注定 blocked 的进程）
+  const enableTokenEarly = await call("confirm.token", { action: "plugins.enable", target: wechat.id });
+  let runtimeGateError = "";
+  try {
+    await call("plugins.enable", { id: wechat.id, confirmToken: enableTokenEarly.token });
+  } catch (error) {
+    runtimeGateError = String(error && error.message ? error.message : error);
+  }
+  check("没装运行环境时启用被拦（提示先下载运行环境）", runtimeGateError.includes("运行环境"), runtimeGateError.slice(0, 60));
 
   const router = plugins.find((item) => item.id === "core.llm-router");
   check(
@@ -518,6 +524,27 @@ try {
 
   const runtimeGone = await call("plugins.runtime.uninstall", { id: runtimeId });
   check("卸载后状态清空、目录删掉", runtimeGone.installed === null && !fs.existsSync(runtimeInstalled2.installed?.path ?? ""));
+
+  /* 18. 下载运行环境后插件真的就绪：装运行环境 → 授权 → 启用 → 体检 ok（骨架就绪，不是假装接通） */
+  feedVersion = "1.0.0";
+  await call("plugins.runtime.install", { id: runtimeId });
+  const enableToken = await call("confirm.token", { action: "plugins.enable", target: wechat.id });
+  const enabledWechat = await call("plugins.enable", { id: wechat.id, confirmToken: enableToken.token });
+  check("装好运行环境后用界面叫法的 token 能启用", enabledWechat.enabled === true, `status=${enabledWechat.status}`);
+  const wechatHealth = enabledWechat.health;
+  check(
+    "启用后插件体检是 ok（适配器骨架在跑）",
+    wechatHealth !== null && wechatHealth.ok === true && wechatHealth.status === "ok",
+    `health=${JSON.stringify(wechatHealth)}`,
+  );
+  check(
+    "体检文案说清「骨架就绪、未接入本体」",
+    typeof wechatHealth?.message === "string" && wechatHealth.message.includes("骨架已就绪") && wechatHealth.message.includes("未接入"),
+    wechatHealth?.message ?? "",
+  );
+  const channelsAfter = await call("channels.list");
+  const wechatChannel = channelsAfter.find((item) => item.pluginId === "channel.wechat-replica");
+  check("通道列表里它仍然不是可写通道（骨架≠接通）", wechatChannel !== undefined && wechatChannel.writeReady === false);
 
 } catch (error) {
   check("端到端流程", false, error.message);

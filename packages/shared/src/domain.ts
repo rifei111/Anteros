@@ -314,6 +314,11 @@ export interface PluginHealth {
   status: "ok" | "degraded" | "blocked";
   message: string;
   checkedTs: number;
+  /**
+   * 通道类插件的「真的接上了吗」：能力声明是"它被允许做什么"，
+   * 这里是"它现在实际能做什么"。骨架能跑但还没接上第三方通道本体时，write 必须是 false。
+   */
+  attachments?: { read?: boolean; write?: boolean; typing?: boolean; recall?: boolean };
 }
 
 export interface PluginInfo {

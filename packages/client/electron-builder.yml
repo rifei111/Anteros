@@ -40,3 +40,10 @@ nsis:
   installerIcon: build/icon.ico
   uninstallerIcon: build/icon.ico
   runAfterFinish: true
+# 应用内更新（electron-updater）的发布源：打包时会据此生成 resources/app-update.yml，
+# 并额外产出 latest.yml 与 *.exe.blockmap（差分更新清单）。不配这个，界面点「检查更新」永远失败。
+publish:
+  provider: github
+  owner: rifei111
+  repo: Anteros
+  releaseType: release

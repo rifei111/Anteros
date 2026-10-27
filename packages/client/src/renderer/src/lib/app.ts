@@ -7,7 +7,7 @@
 import type { ChatMessage, KernelEvents, MemoryItem } from "@anteros/shared";
 import { humanizeError } from "./errors";
 import { invoke, newEventId, pollConnection, subscribe, appInfo, quitApp } from "./kernel";
-import { appendLog, applyPluginRuntime, getState, pushToast, setState, type AdminTab } from "./store";
+import { appendLog, applyPluginRuntime, applyUpdateStatus, getState, pushToast, setState, type AdminTab } from "./store";
 import { truncate } from "./format";
 
 const ONBOARDED_KEY = "anteros.onboarded.v1";
@@ -345,6 +345,15 @@ function wireEvents(): () => void {
       applyPluginRuntime(payload);
     }),
   );
+
+  // 应用自身更新（软件整体）由主进程算状态：这里只订阅、只落 store，不自己轮询。
+  // 桌面端才有 updates 能力（浏览器里跑 dev 时会缺失），所以要做存在性判断。
+  if (window.anteros?.updates) {
+    cleanups.push(window.anteros.updates.onEvent((status) => applyUpdateStatus(status)));
+    void window.anteros.updates.status().then((status) => {
+      if (status) applyUpdateStatus(status);
+    });
+  }
 
   cleanups.push(
     subscribe("event.channels", (payload) => {

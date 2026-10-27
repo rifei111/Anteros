@@ -16,7 +16,11 @@ import type {
   KernelParams,
   KernelResult,
 } from "@anteros/shared";
-import { IPC_CHANNEL, type IpcResult } from "../common/protocol";
+import { IPC_CHANNEL, UPDATE_EVENT_CHANNEL, UPDATE_METHODS, type IpcResult, type UpdateStatusView } from "../common/protocol";
+import type { ExtendedClientBridge } from "../common/protocol";
+
+/** 更新相关能力：状态查询、检查、下载、重启安装、订阅状态变化。 */
+type UpdatesBridge = ExtendedClientBridge["updates"];
 
 class BridgeError extends Error {
   readonly code: string;
@@ -36,7 +40,7 @@ function toBridgeError(failure: { code: string; message: string; hint?: string; 
   return new BridgeError(failure.code, failure.message, failure.hint, failure.detail);
 }
 
-const bridge: ClientBridge & { quitApp: () => Promise<void> } = {
+const bridge: ClientBridge & { quitApp: () => Promise<void>; updates: UpdatesBridge } = {
   async invoke<M extends KernelMethod>(method: M, params: KernelParams<M>): Promise<KernelResult<M>> {
     const result: unknown = await ipcRenderer.invoke(IPC_CHANNEL.invoke, method, params);
     const envelope = result as IpcResult<unknown>;
@@ -92,6 +96,35 @@ const bridge: ClientBridge & { quitApp: () => Promise<void> } = {
 
   async quitApp() {
     await ipcRenderer.invoke(IPC_CHANNEL.quitApp);
+  },
+
+  updates: {
+    async status() {
+      const result: unknown = await ipcRenderer.invoke(UPDATE_METHODS.status);
+      return (result ?? null) as UpdateStatusView | null;
+    },
+    async check() {
+      const result: unknown = await ipcRenderer.invoke(UPDATE_METHODS.check);
+      return (result ?? null) as UpdateStatusView | null;
+    },
+    async download() {
+      const result: unknown = await ipcRenderer.invoke(UPDATE_METHODS.download);
+      return (result ?? null) as UpdateStatusView | null;
+    },
+    async install() {
+      const result: unknown = await ipcRenderer.invoke(UPDATE_METHODS.install);
+      return (result ?? null) as UpdateStatusView | null;
+    },
+    onEvent(handler: (status: UpdateStatusView) => void): () => void {
+      const listener = (_event: Electron.IpcRendererEvent, status: unknown): void => {
+        if (!status || typeof status !== "object") return;
+        handler(status as UpdateStatusView);
+      };
+      ipcRenderer.on(UPDATE_EVENT_CHANNEL, listener);
+      return () => {
+        ipcRenderer.removeListener(UPDATE_EVENT_CHANNEL, listener);
+      };
+    },
   },
 };
 
