@@ -111,6 +111,8 @@ export class WechatChannelService {
   private pollTimer: NodeJS.Timeout | null = null;
   private sinceSeq: number | null = null;
   private deepChecksDone = false;
+  /** 旁路进程是单线程的：发消息/预热期间它没法响应 poll，这段时间暂停巡检 */
+  private sendInFlight = 0;
 
   constructor(
     private readonly deps: KernelDeps,
@@ -819,6 +821,20 @@ export class WechatChannelService {
         this.sinceSeq = 0;
       }
       this.startPolling();
+      // 预热：先把目标会话打开。不预热的话，用户第一条消息要等界面驱动找窗口
+      // + 搜会话（十几秒）才开始打字；预热过之后只是粘贴 + 回车。
+      // 预热会占住单线程的旁路进程，所以期间暂停巡检（见 startPolling 里的 sendInFlight 判断）。
+      this.sendInFlight += 1;
+      void this.request("warmup", {}, 180_000)
+        .then(() => {
+          this.deps.log.info("wechat warmup: 目标会话已打开");
+        })
+        .catch((error: unknown) => {
+          this.deps.log.warn(`wechat warmup 失败：${error instanceof Error ? error.message : String(error)}`);
+        })
+        .finally(() => {
+          this.sendInFlight = Math.max(0, this.sendInFlight - 1);
+        });
     } catch (error) {
       this.starting = false;
       this.running = false;
@@ -869,11 +885,16 @@ export class WechatChannelService {
     this.stopPolling();
     const tick = async (): Promise<void> => {
       if (!this.running) return;
-      try {
-        await this.pollOnce();
-      } catch (error) {
-        this.lastError = error instanceof Error ? error.message : String(error);
-        this.publish();
+      // 旁路进程是单线程的：发消息要驱动界面（点窗口、粘贴、OCR），一次十几秒，
+      // 期间它没法响应 poll。这时候再往管道里塞请求只会排队、超时、刷错误日志，
+      // 所以发送期间干脆跳过这一轮巡检。
+      if (this.sendInFlight === 0) {
+        try {
+          await this.pollOnce();
+        } catch (error) {
+          this.lastError = error instanceof Error ? error.message : String(error);
+          this.publish();
+        }
       }
       if (this.running) {
         this.pollTimer = setTimeout(() => void tick(), POLL_INTERVAL_MS);
@@ -906,7 +927,10 @@ export class WechatChannelService {
     if (typeof result.nextSeq === "number") this.sinceSeq = result.nextSeq;
     for (const message of result.messages ?? []) {
       if (message.isSelf === true) continue;
-      if ((message.kind ?? "text") !== "text") continue;
+      // 旁路进程负责把上游的中文类型归一成 text/image/…，这里再兜一层：
+      // 只处理文本，但两种写法都认（历史上中文 kind 被直接透传过，导致消息全被丢掉）
+      const kind = String(message.kind ?? "text").trim().toLowerCase();
+      if (kind !== "text" && kind !== "文本") continue;
       const text = (message.text ?? "").trim();
       if (text.length === 0) continue;
       this.lastInboundTs = Date.now();
@@ -924,6 +948,7 @@ export class WechatChannelService {
   send(text: string): void {
     const value = (text ?? "").trim();
     if (value.length === 0 || !this.running) return;
+    this.sendInFlight += 1;
     void this.request("send", { text: value, chatUsername: this.chatUsername() }, 60_000)
       .then(() => {
         this.lastOutboundTs = Date.now();
@@ -933,6 +958,9 @@ export class WechatChannelService {
       .catch((error: unknown) => {
         this.lastError = `发送失败：${error instanceof Error ? error.message : String(error)}`;
         this.publish();
+      })
+      .finally(() => {
+        this.sendInFlight = Math.max(0, this.sendInFlight - 1);
       });
   }
 

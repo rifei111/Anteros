@@ -12,3 +12,6 @@ coverage/
 *.sqlite-wal
 .DS_Store
 Thumbs.db
+# Python 旁路进程的字节码缓存
+__pycache__/
+*.pyc

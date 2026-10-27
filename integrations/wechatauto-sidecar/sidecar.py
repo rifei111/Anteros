@@ -41,7 +41,8 @@ class State:
         self.chat_title: Optional[str] = None
         self.db: Any = None
         self.db_error: Optional[str] = None
-        self.guia_error: Optional[str] = None
+        self.gui: Any = None
+        self.gui_error: Optional[str] = None
         self.lock = threading.RLock()
         self._wechatauto_version: Optional[str] = None
         self._hello_done = False
@@ -96,6 +97,30 @@ def load_db() -> Any:
             STATE.db_error = f"{type(error).__name__}: {error}"
             log(f"打开微信数据库失败：{STATE.db_error}")
         return STATE.db
+
+
+def get_gui() -> Any:
+    """复用同一个 WeChatGUI 实例。
+
+    上游的 `quick_send()` 每次调用都会 `WeChatGUI()` 新建一个实例，实例里缓存的
+    `_uia`、`_current_chat`、`_last_input_box` 就全丢了 —— 于是每发一条都要
+    重新找窗口、重新搜会话、重新 OCR，一条回复要十几秒。这里改成进程内复用，
+    第一次定位之后，后续发送走 UIA 的「当前会话已经是目标」快路径。
+    """
+    with STATE.lock:
+        if STATE.gui is not None:
+            return STATE.gui
+        try:
+            import wechatauto.guia as guia  # type: ignore
+
+            STATE.gui = guia.WeChatGUI()
+            STATE.gui_error = None
+            log("界面驱动已就绪（后续发送复用同一个实例）")
+        except Exception as error:  # noqa: BLE001
+            STATE.gui = None
+            STATE.gui_error = f"{type(error).__name__}: {error}"
+            log(f"界面驱动初始化失败：{STATE.gui_error}")
+        return STATE.gui
 
 
 def alias_lookup(db: Any, value: str) -> Optional[str]:
@@ -341,6 +366,46 @@ def method_configure(params: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
+KIND_MAP = {
+    "文本": "text",
+    "文字": "text",
+    "图片": "image",
+    "语音": "voice",
+    "视频": "video",
+    "文件": "file",
+    "表情": "sticker",
+    "动画表情": "sticker",
+    "系统消息": "system",
+    "引用": "quote",
+    "位置": "location",
+    "位置共享": "location",
+    "链接": "link",
+    "名片": "card",
+    "转账": "transfer",
+    "红包": "redpacket",
+    "撤回": "revoke",
+}
+
+
+def normalize_kind(raw: Any) -> str:
+    """把上游的中文消息类型归一成内核认识的英文 kind。
+
+    上游 get_new_messages 给的 kind 是中文（"文本"、"图片"、"系统消息"…），
+    内核按 "text" 过滤。之前直接把中文原样透传，内核那条 `kind !== "text"`
+    就把**所有**消息都丢掉了，表现成"通道就绪、也读得到，但永远不回"。
+    """
+    value = str(raw or "").strip()
+    if not value:
+        return "text"
+    mapped = KIND_MAP.get(value)
+    if mapped:
+        return mapped
+    lowered = value.lower()
+    if lowered in KIND_MAP.values():
+        return lowered
+    return "other"
+
+
 def method_poll(params: Dict[str, Any]) -> Dict[str, Any]:
     db = load_db()
     if db is None:
@@ -359,17 +424,24 @@ def method_poll(params: Dict[str, Any]) -> Dict[str, Any]:
         }
     messages: List[Dict[str, Any]] = []
     next_seq = since
+    # 上游 get_new_messages 返回的字段是 local_id / type / sender_username / content /
+    # sort_seq / shard，**没有 is_self**。以前按 is_self 取，永远拿到 False，
+    # 于是它自己发出去的回复又会被当成新消息读回来 → 自己跟自己无限对话。
+    # 正确判据：发送者 wxid 等于当前登录账号的 wxid。
+    self_wxid = str(getattr(db, "wxid", "") or "")
     for row in rows:
         seq = int(row.get("sort_seq") or row.get("seq") or 0)
         next_seq = max(next_seq, seq)
+        sender = str(row.get("sender_username") or row.get("sender") or "")
+        is_self = bool(self_wxid) and sender == self_wxid
         messages.append(
             {
                 "seq": seq,
-                "msgId": str(row.get("msg_id") or row.get("msgId") or "") or None,
+                "msgId": str(row.get("msg_id") or row.get("server_id") or row.get("local_id") or "") or None,
                 "chatUsername": str(row.get("username") or username),
-                "senderUsername": str(row.get("sender") or row.get("sender_username") or ""),
-                "isSelf": bool(row.get("is_self") if "is_self" in row else row.get("isSelf")),
-                "kind": str(row.get("kind") or row.get("type") or "text"),
+                "senderUsername": sender,
+                "isSelf": is_self,
+                "kind": normalize_kind(row.get("kind") or row.get("type")),
                 "text": row.get("content") if row.get("content") is not None else row.get("text"),
             }
         )
@@ -381,40 +453,67 @@ def method_send(params: Dict[str, Any]) -> Dict[str, Any]:
     if not text:
         return {"ok": False, "error": "不发送空文本"}
     raw = str(params.get("chatUsername") or STATE.chat_username or CHAT_DEFAULT)
-    try:
-        import wechatauto.guia as guia  # type: ignore
-    except Exception as error:  # noqa: BLE001
-        return {"ok": False, "error": f"发消息模块不可用：{type(error).__name__}: {error}"}
+    gui = get_gui()
+    if gui is None:
+        return {"ok": False, "error": f"发消息模块不可用：{STATE.gui_error or '界面驱动未就绪'}"}
 
     with STATE.lock:
         username = normalize_username(raw)
         title = STATE.chat_title
-    try:
-        response = guia.quick_send(text, who=username, verify=False)
-    except TypeError:
-        # 兼容旧签名：没有 who 参数时先切会话再发（上游不同版本差异）
-        try:
-            switch = getattr(guia, "open_chat", None) or getattr(guia, "switch_chat", None)
-            if switch is not None:
-                switch(username)
-            response = guia.quick_send(text, verify=False)
-        except Exception as error:  # noqa: BLE001
-            return {"ok": False, "error": f"{type(error).__name__}: {error}"}
-    except Exception as error:  # noqa: BLE001
-        return {"ok": False, "error": f"{type(error).__name__}: {error}"}
+    # 界面里认的是**会话显示名**（备注/昵称），不是 wxid。传显示名才能命中上游
+    # 的「当前会话就是目标」快路径；传 wxid 每发一条都要重新搜索会话。
+    targets = [value for value in [title, username] if value]
 
-    ok = True
-    for attribute in ("success", "ok", "sent"):
-        value = getattr(response, attribute, None)
-        if isinstance(value, bool):
-            ok = value
-            break
-    return {
-        "ok": ok,
-        "chatUsername": username,
-        "chatTitle": title,
-        "detail": str(response)[:500],
-    }
+    def attempt(target: Optional[str]) -> Any:
+        if target:
+            return gui.send_msg(text, who=target, verify=False)
+        return gui.send_msg(text, verify=False)
+
+    last_error = None
+    for target in targets or [None]:
+        try:
+            response = attempt(target)
+        except Exception as error:  # noqa: BLE001
+            last_error = f"{type(error).__name__}: {error}"
+            continue
+        ok = True
+        for attribute in ("success", "ok", "sent"):
+            value = getattr(response, attribute, None)
+            if isinstance(value, bool):
+                ok = value
+                break
+        detail = str(response)[:500]
+        if ok:
+            return {
+                "ok": True,
+                "chatUsername": username,
+                "chatTitle": title,
+                "detail": detail,
+            }
+        last_error = detail
+        # 没发成功就换下一个目标写法再试一次（显示名加载失败时会退到 wxid）
+    return {"ok": False, "chatUsername": username, "chatTitle": title, "error": last_error or "发送失败"}
+
+
+def method_warmup(params: Dict[str, Any]) -> Dict[str, Any]:
+    """预热：把目标会话先打开。
+
+    不预热的话，用户发第一条消息后要等界面驱动找窗口 + 搜会话，十几秒才回；
+    提前打开一次，后面只是粘贴 + 回车。
+    """
+    gui = get_gui()
+    if gui is None:
+        return {"ok": False, "error": STATE.gui_error or "界面驱动未就绪"}
+    with STATE.lock:
+        target = STATE.chat_title or STATE.chat_username
+    if not target:
+        return {"ok": False, "error": "还没有设置会话"}
+    try:
+        opened = bool(gui.open_chat(target))
+    except Exception as error:  # noqa: BLE001
+        return {"ok": False, "target": target, "error": f"{type(error).__name__}: {error}"}
+    log(f"会话预热：{target} → {'已打开' if opened else '没打开'}")
+    return {"ok": opened, "target": target}
 
 
 def method_doctor(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -457,6 +556,7 @@ METHODS = {
     "configure": method_configure,
     "poll": method_poll,
     "send": method_send,
+    "warmup": method_warmup,
     "doctor": method_doctor,
 }
 
