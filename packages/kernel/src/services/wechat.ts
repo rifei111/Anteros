@@ -11,8 +11,11 @@
  * 默认关闭。开启必须同时满足：owner 身份 + 已过声明闸 + 前端传了 ackRisk:true。
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { AnterosError, ERROR_CODES } from "@anteros/shared";
 import type { ErrorCode, WechatChannelStatus, WechatCheck } from "@anteros/shared";
@@ -27,6 +30,26 @@ const POLL_INTERVAL_MS = 1500;
 const REQUEST_TIMEOUT_MS = 20_000;
 const HEALTH_TIMEOUT_MS = 90_000;
 const MAX_LOG_LINES = 200;
+
+/**
+ * 应用内可下载的便携 Python（官方 embeddable 包，解压即用，不装进系统、不写注册表）。
+ *
+ * 为什么用便携包：用户不该为了这条通道去动系统 Python（PATH、版本冲突、32/64 位）。
+ * 为什么钉 hash：这是会被当解释器执行的二进制，必须能证明拿到的就是这一份。
+ * 如果哪天 python.org 换了文件，会明确报「校验不通过」，不会静默执行别的二进制。
+ */
+const EMBEDDED_PYTHON = {
+  version: "3.11.9",
+  url: "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip",
+  sha256: "009d6bf7e3b2ddca3d784fa09f90fe54336d5b60f0e0f305c37f400bf83cfd3b",
+  bytes: 11_249_023,
+} as const;
+
+/** get-pip.py 没有稳定 hash（官方每周重建），只校验它是 Python 脚本且能跑通。 */
+const GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py";
+
+/** 这条通道需要的 Python 依赖。 */
+const PYTHON_PACKAGES = ["wechatauto-replica", "pypinyin"];
 
 /** 微信 4.x 桌面版可能的安装位置（只用来做存在性判断，不读它）。 */
 const WECHAT_PATHS = [
@@ -54,6 +77,8 @@ export interface WechatChannelOptions {
   onInbound: (message: { text: string; externalId: string }) => Promise<void>;
   /** 把 agent 的一条分条发回微信 */
   sendOutbound: (text: string) => void;
+  /** 本机数据目录（便携 Python 运行环境装在这里的 wechat-runtime/ 下） */
+  dataDir: string;
 }
 
 export class WechatChannelService {
@@ -63,6 +88,11 @@ export class WechatChannelService {
   private buffer = "";
   private starting = false;
   private installing = false;
+  /** 是我们自己停的（不是它自己崩的）：close 事件里别把 lastError 改成 SIGTERM。
+   *  用「粘住」的标记而不是短暂窗口：close 事件是异步到的，stop() 早返回了。 */
+  private stoppedByUs = false;
+  /** 正在启动中的那一次（并发调用共用，别各起一个 python）。 */
+  private startPromise: Promise<void> | null = null;
   private running = false;
   private canRead = false;
   private canSend = false;
@@ -413,31 +443,11 @@ export class WechatChannelService {
       "pip",
       "install",
       "--upgrade",
-      "wechatauto-replica",
-      "pypinyin",
+      ...PYTHON_PACKAGES,
       "--disable-pip-version-check",
     ];
     try {
-      await new Promise<void>((resolve, reject) => {
-        const child = spawn(python.command, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-        const onData = (chunk: Buffer): void => {
-          const text = chunk.toString("utf8");
-          for (const line of text.split(/\r?\n/)) {
-            const trimmed = line.trimEnd();
-            if (trimmed.length === 0) continue;
-            this.installLog.push(trimmed);
-            if (this.installLog.length > MAX_LOG_LINES) this.installLog.shift();
-            this.options.emit("event.wechat.log", { line: trimmed });
-          }
-        };
-        child.stdout?.on("data", onData);
-        child.stderr?.on("data", onData);
-        child.on("error", (error) => reject(error));
-        child.on("close", (code) => {
-          if (code === 0) resolve();
-          else reject(new AnterosError(ERROR_CODES.EBLOCKED, `pip 退出码 ${code}，看日志最后几行`));
-        });
-      });
+      await this.runStreaming(python.command, args, 15 * 60_000);
     } catch (error) {
       this.lastError = error instanceof AnterosError ? error.message : String(error);
       this.installing = false;
@@ -450,6 +460,213 @@ export class WechatChannelService {
     this.installLog.push("✔ 依赖安装完成");
     await this.refresh();
     return this.status();
+  }
+
+  /**
+   * 一键准备这条通道需要的运行环境（应用内下载，不装系统 Python）：
+   *   官方便携版 Python → 校验 sha256 → 解压到数据目录 → 开 site → get-pip → 装依赖
+   * 全程只有用户点这一下，之后走的是"自己的 Python"，不污染系统、卸载删目录即可。
+   */
+  async installRuntime(): Promise<WechatChannelStatus> {
+    this.permissions.assertOwner("下载微信通道运行环境");
+    this.consent.requireConsent("app");
+    if (this.installing) return this.status();
+    this.installing = true;
+    this.installLog = [];
+    this.lastError = null;
+    this.publish();
+    this.audit.log("wechat.install_runtime", {
+      actorRole: "owner",
+      after: { python: EMBEDDED_PYTHON.version, packages: PYTHON_PACKAGES },
+    });
+
+    const baseDir = path.join(this.options.dataDir, "wechat-runtime");
+    const runtimeDir = path.join(baseDir, `python-${EMBEDDED_PYTHON.version}`);
+    const pythonExe = path.join(runtimeDir, "python.exe");
+    try {
+      if (!existsSync(pythonExe)) {
+        mkdirSync(baseDir, { recursive: true });
+        const zipPath = path.join(baseDir, `python-${EMBEDDED_PYTHON.version}-embed-amd64.zip`);
+        await this.logLine(
+          `下载便携版 Python ${EMBEDDED_PYTHON.version}（64 位，约 ${Math.round(EMBEDDED_PYTHON.bytes / 1024 / 1024)}MB）…`,
+        );
+        const digest = await this.download(EMBEDDED_PYTHON.url, zipPath, EMBEDDED_PYTHON.bytes);
+        if (digest !== EMBEDDED_PYTHON.sha256) {
+          rmSync(zipPath, { force: true });
+          throw new AnterosError(
+            ERROR_CODES.EBLOCKED,
+            "下载下来的 Python 包校验不通过（内容和预期不一致），已删掉不执行",
+            {
+              hint: "可能是网络代理改写了内容。可以自己装 64 位 Python 3.10+ 后在设置里填路径，或稍后重试",
+            },
+          );
+        }
+        await this.logLine("校验通过（sha256 一致）");
+        rmSync(runtimeDir, { recursive: true, force: true });
+        await this.logLine("解压…");
+        await this.extractZip(zipPath, runtimeDir);
+        this.fixEmbeddedPth(runtimeDir);
+        rmSync(zipPath, { force: true });
+        await this.logLine(`便携 Python 就位：${pythonExe}`);
+      } else {
+        await this.logLine(`复用已下载的便携 Python：${pythonExe}`);
+      }
+
+      await this.logLine("引导 pip…");
+      const getPip = path.join(runtimeDir, "get-pip.py");
+      await this.download(GET_PIP_URL, getPip, 0);
+      await this.runStreaming(pythonExe, [getPip, "--no-warn-script-location"], 10 * 60_000);
+      rmSync(getPip, { force: true });
+
+      await this.logLine(`安装依赖：${PYTHON_PACKAGES.join(" ")}（会联网，几分钟）…`);
+      await this.runStreaming(
+        pythonExe,
+        ["-m", "pip", "install", "--upgrade", ...PYTHON_PACKAGES, "--disable-pip-version-check"],
+        30 * 60_000,
+      );
+
+      const probe = await this.runProcess(
+        pythonExe,
+        ["-c", "import sys,platform,wechatauto;print(sys.version.split()[0]);print(platform.architecture()[0]);print(wechatauto.__version__)"],
+        60_000,
+      );
+      if (!probe.ok) {
+        throw new AnterosError(ERROR_CODES.EBLOCKED, "依赖装完了但 Python 里还导不进 wechatauto，看日志最后几行");
+      }
+      const [version = "", bits = "", libVersion = ""] = probe.stdout.trim().split(/\r?\n/);
+      this.settings.setJson("wechat.pythonPath", pythonExe);
+      this.settings.setJson("wechat.pythonSource", "embedded");
+      await this.logLine(`✔ 运行环境就绪：Python ${version}（${bits}）+ wechatauto ${libVersion}`);
+    } catch (error) {
+      this.lastError = error instanceof AnterosError ? error.message : String(error);
+      this.installLog.push(`✖ ${this.lastError}`);
+      this.installing = false;
+      await this.refresh();
+      this.publish();
+      return this.status();
+    }
+
+    this.installing = false;
+    await this.refresh();
+    return this.status();
+  }
+
+  /** 下载到文件，边下边报进度（每 10% 一条日志），返回 sha256。 */
+  private async download(url: string, dest: string, expectedBytes: number): Promise<string> {
+    const response = await fetch(url, { redirect: "follow" });
+    if (!response.ok || response.body === null) {
+      throw new AnterosError(ERROR_CODES.EBLOCKED, `下载失败：${url} 返回 ${response.status}`, {
+        hint: "检查网络；公司代理/防火墙可能会拦 python.org 与 pypi",
+      });
+    }
+    const total = Number(response.headers.get("content-length") ?? 0) || expectedBytes;
+    const hash = createHash("sha256");
+    let got = 0;
+    let lastPercent = -1;
+    const source = Readable.fromWeb(response.body as import("node:stream/web").ReadableStream);
+    source.on("data", (chunk: Buffer) => {
+      got += chunk.length;
+      hash.update(chunk);
+      if (total > 0) {
+        const percent = Math.floor((got / total) * 100);
+        if (percent >= lastPercent + 10) {
+          lastPercent = percent;
+          void this.logLine(`  ${percent}%  ${(got / 1024 / 1024).toFixed(1)}MB / ${(total / 1024 / 1024).toFixed(1)}MB`);
+        }
+      }
+    });
+    await pipeline(source, createWriteStream(dest));
+    return hash.digest("hex");
+  }
+
+  /** 解压 zip：优先 tar.exe（Win10+ 自带，libarchive 支持 zip），失败退回 PowerShell。 */
+  private async extractZip(zipPath: string, destDir: string): Promise<void> {
+    mkdirSync(destDir, { recursive: true });
+    const viaTar = await this.runProcess("tar.exe", ["-xf", zipPath, "-C", destDir], 5 * 60_000);
+    if (viaTar.ok && existsSync(path.join(destDir, "python.exe"))) return;
+    rmSync(destDir, { recursive: true, force: true });
+    mkdirSync(destDir, { recursive: true });
+    const viaPs = await this.runProcess(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `Expand-Archive -LiteralPath '${zipPath.replaceAll("'", "''")}' -DestinationPath '${destDir.replaceAll("'", "''")}' -Force`,
+      ],
+      5 * 60_000,
+    );
+    if (!viaPs.ok || !existsSync(path.join(destDir, "python.exe"))) {
+      throw new AnterosError(ERROR_CODES.EBLOCKED, "解压 Python 包失败", { hint: "看日志；也可以手动解压后填 Python 路径" });
+    }
+  }
+
+  /**
+   * 便携版 Python 默认不加载 site-packages（_pth 里 import site 是注释掉的），
+   * pip 装的东西就看不见。这里把 Lib\site-packages 加成搜索路径并打开 site。
+   */
+  private fixEmbeddedPth(runtimeDir: string): void {
+    const pth = ["python311._pth", "python312._pth", "python310._pth", "python313._pth"]
+      .map((name) => path.join(runtimeDir, name))
+      .find((candidate) => existsSync(candidate));
+    if (pth === undefined) return;
+    const content = [
+      `${path.basename(pth).replace("._pth", "")}.zip`,
+      "Lib\\site-packages",
+      ".",
+      "import site",
+      "",
+    ].join("\r\n");
+    writeFileSync(pth, content, "utf8");
+    mkdirSync(path.join(runtimeDir, "Lib", "site-packages"), { recursive: true });
+  }
+
+  /** 跑一个子进程，把输出逐行写进安装日志（pip 这类会跑很久的命令都用它）。 */
+  private async runStreaming(command: string, args: string[], timeoutMs: number): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(command, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        child.kill();
+        reject(new AnterosError(ERROR_CODES.EBLOCKED, `命令超时（${Math.round(timeoutMs / 60_000)} 分钟）：${command}`));
+      }, timeoutMs);
+      const onData = (chunk: Buffer): void => {
+        const text = chunk.toString("utf8");
+        for (const line of text.split(/\r?\n/)) {
+          const trimmed = line.trimEnd();
+          if (trimmed.length === 0) continue;
+          this.installLog.push(trimmed);
+          if (this.installLog.length > MAX_LOG_LINES) this.installLog.shift();
+          this.options.emit("event.wechat.log", { line: trimmed });
+        }
+      };
+      child.stdout?.on("data", onData);
+      child.stderr?.on("data", onData);
+      child.on("error", (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.on("close", (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else reject(new AnterosError(ERROR_CODES.EBLOCKED, `命令退出码 ${code}，看日志最后几行`));
+      });
+    });
+  }
+
+  /** 追加一条安装日志并推到界面（下载进度、步骤提示都走这里）。 */
+  private async logLine(line: string): Promise<void> {
+    this.installLog.push(line);
+    if (this.installLog.length > MAX_LOG_LINES) this.installLog.shift();
+    this.options.emit("event.wechat.log", { line });
+    this.publish();
+    await Promise.resolve();
   }
 
   async enable(input: { ackRisk: boolean; chatUsername?: string }): Promise<WechatChannelStatus> {
@@ -513,8 +730,20 @@ export class WechatChannelService {
 
   // ---------------------------------------------------------------- 进程与协议
 
+  /** 并发安全：boot() 与 enable() 可能同时调 start()，共用同一次启动。 */
   async start(): Promise<void> {
-    if (this.child || this.starting) return;
+    // 先看有没有正在启动的那一次：那时 child 已经赋值但握手还没完成，等它更准
+    if (this.startPromise !== null) return this.startPromise;
+    if (this.child !== null) return;
+    this.startPromise = this.doStart().finally(() => {
+      this.startPromise = null;
+    });
+    return this.startPromise;
+  }
+
+  private async doStart(): Promise<void> {
+    if (this.child !== null || this.starting) return;
+    this.stoppedByUs = false;
     if (!this.isEnabled()) return;
     this.starting = true;
     this.lastError = null;
@@ -565,7 +794,7 @@ export class WechatChannelService {
         this.running = false;
         this.child = null;
         this.stopPolling();
-        if (this.isEnabled() && code !== 0) {
+        if (!this.stoppedByUs && this.isEnabled() && code !== 0) {
           this.lastError = `旁路进程退出（code=${code ?? "null"} signal=${signal ?? "null"}）`;
         }
         this.publish();
@@ -601,6 +830,7 @@ export class WechatChannelService {
   }
 
   async stop(): Promise<void> {
+    this.stoppedByUs = true;
     this.stopPolling();
     const child = this.child;
     this.child = null;
@@ -734,7 +964,8 @@ export class WechatChannelService {
     if (!pending) return;
     this.pending.delete(id);
     clearTimeout(pending.timer);
-    if (message.ok === true) {
+    // sidecar 两种回包都认：{ok:true,result} 与标准 {result}（老版本/新版本兼容）
+    if (message.error === undefined || message.error === null) {
       pending.resolve(message.result ?? {});
       return;
     }

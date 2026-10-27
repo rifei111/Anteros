@@ -276,3 +276,24 @@ New version 0.6.1 has been downloaded to ...\pending\Anteros-Setup-0.6.1-x64.exe
 
 - 已验证：内核侧 71 项冒烟全过（默认关闭、体检项非空、通道列表里有内置通道且 `writeReady=false`、不确认风险不许开、没跑起来时诊断被拒、白名单可设）、客户端面板渲染与依赖安装/开启/诊断/保存四类操作走通、打包产物含 `resources/integrations/wechatauto-sidecar`。
 - **未验证**：真实微信收发。本机没有可用 Python，也没有 `wechatauto-replica` 运行环境；端到端「读消息 → 进记忆 → 回复 → 发出去」需要在装好 Python 与依赖、登录微信 4.x 后由用户实测。
+
+## 16. v0.8.0 增补（运行环境应用内一键下载）
+
+### 16.1 做什么
+
+- 通道页新增「一键下载运行环境」：内核自己下载 Python **官方 embeddable 包**（3.11.9，11MB），
+  先校验 sha256（钉死值 `009d6bf7…cfd3b`，不符即删除、不执行），再解压到 `<数据目录>/wechat-runtime/python-3.11.9/`，
+  然后修正 `._pth` 打开 `Lib\site-packages`、下载 `get-pip.py` 引导 pip、最后 `pip install wechatauto-replica pypinyin`。
+- 全程落在 Anteros 自己的数据目录：**不装系统 Python、不改 PATH、不写注册表**，卸载删目录即可。
+- 下载过程每 10% 报一次进度，pip 输出逐行进界面日志（`event.wechat.log`）。
+- 自己装 Python 的路保留：设置里有 `wechat.pythonPath` 就优先用它（`wechat.pythonSource` 记录来源），一键下载失败不影响手动路线。
+
+### 16.2 接口
+
+- `channels.wechat.installRuntime` → `WechatChannelStatus`（owner + 已过声明闸；装的过程中 `installing=true` 且 `installLog` 累积）。
+- 校验与回退：Python 包 sha256 不符 → 删包 + 人话报错（提示可能被代理改写）；解压优先 `tar.exe`、失败退回 PowerShell `Expand-Archive`；pip 超时 30 分钟。
+
+### 16.3 验证范围（如实说明）
+
+- 已验证：内核与客户端 typecheck 0 error、`check-boundaries` 通过、冒烟 71 项不回归。
+- 真机一键下载：见本节下方的实测记录（联网装完并体检通过才算数；没跑通就如实写没跑通）。

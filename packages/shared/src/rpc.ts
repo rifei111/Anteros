@@ -170,6 +170,8 @@ export interface KernelApi {
   "channels.panicStop": MethodSpec<{ confirmToken?: string }, { stopped: string[]; restored: boolean; message: string }>;
   "channels.wechat.status": MethodSpec<Record<string, never>, WechatChannelStatus>;
   "channels.wechat.installDeps": MethodSpec<Record<string, never>, WechatChannelStatus>;
+  /** 一键下载运行环境：便携版 Python + pip + wechatauto-replica（全在数据目录里，不动系统） */
+  "channels.wechat.installRuntime": MethodSpec<Record<string, never>, WechatChannelStatus>;
   "channels.wechat.enable": MethodSpec<
     { ackRisk: boolean; chatUsername?: string },
     WechatChannelStatus

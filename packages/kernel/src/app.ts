@@ -137,6 +137,7 @@ export class App {
         });
       },
       sendOutbound: (text) => this.wechat.send(text),
+      dataDir: this.runtime.dataDir,
     });
     this.proactive = new ProactiveService(this.deps, ports, runtime.consent, runtime.cost, runtime.settings);
     this.proactive.start();
@@ -435,6 +436,8 @@ export class App {
         return this.wechat.refresh();
       case "channels.wechat.installDeps":
         return this.wechat.installDeps();
+      case "channels.wechat.installRuntime":
+        return this.wechat.installRuntime();
       case "channels.wechat.enable": {
         const input = (params ?? {}) as { ackRisk?: unknown; chatUsername?: unknown };
         return this.wechat.enable({

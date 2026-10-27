@@ -121,6 +121,24 @@ export function WechatChannelPanel() {
     });
   };
 
+  // 一键下载运行环境：便携版 Python + pip + wechatauto-replica，全落在数据目录里，不动系统
+  const installRuntime = (): void => {
+    setLocalLog([]);
+    void run("runtime", async () => {
+      const next = await invoke("channels.wechat.installRuntime", {});
+      loaded.setData(next);
+      setLocalLog(next.installLog);
+      const ready = next.checks.every((check) => check.state !== "fail");
+      pushToast(
+        ready ? "success" : "warn",
+        ready ? "运行环境已就绪" : "运行环境没装完",
+        ready
+          ? "Python 与 wechatauto 都在这台电脑的 Anteros 数据目录里，不占系统环境；现在可以直接开启通道。"
+          : (next.lastError ?? "看日志最后几行，多半是网络被拦。"),
+      );
+    });
+  };
+
   const enable = (): void => {
     void run("enable", async () => {
       const next = await invoke("channels.wechat.enable", { ackRisk: true, chatUsername: chatInput.trim() || undefined });
@@ -235,20 +253,27 @@ export function WechatChannelPanel() {
 
           {pythonMissing ? (
             <div className="wechat-block">
-              <div className="wechat-block-title">先准备运行环境（三件事）</div>
-              <ol className="bullet-list">
-                <li>
-                  装 64 位 Python 3.10+，安装时勾选 <code>Add python.exe to PATH</code>
-                  <button
-                    className="btn btn-link"
-                    onClick={() => void window.open("https://www.python.org/downloads/windows/", "_blank")}
-                  >
-                    打开下载页
-                  </button>
-                </li>
-                <li>装微信 4.x 桌面版并登录（通道要读它的数据库、驱动它的界面）。</li>
-                <li>点下面的「安装运行依赖」，装 wechatauto-replica（会联网，几分钟）。</li>
-              </ol>
+              <div className="wechat-block-title">先准备运行环境</div>
+              <p>
+                点下面这个按钮，Anteros 自己下载一份便携版 Python 到数据目录，再用它装
+                wechatauto-replica。<strong>不装系统 Python、不改 PATH、不写注册表</strong>，卸载时删目录即可。
+              </p>
+              <div className="row-gap">
+                <button className="btn btn-primary" onClick={installRuntime} disabled={busy !== null || status.installing}>
+                  {status.installing ? "正在下载并安装…" : "一键下载运行环境"}
+                </button>
+                <span className="muted small">约 11MB Python + 100~200MB 依赖，看网速</span>
+              </div>
+              <p className="muted small">
+                也可以自己装：64 位 Python 3.10+ 并勾选 <code>Add python.exe to PATH</code>，然后重新体检。
+                <button
+                  className="btn btn-link"
+                  onClick={() => void window.open("https://www.python.org/downloads/windows/", "_blank")}
+                >
+                  打开下载页
+                </button>
+              </p>
+              <p className="muted small">另外还需要：装微信 4.x 桌面版并先登录（通道要读它的数据库、驱动它的界面）。</p>
             </div>
           ) : null}
 
@@ -270,6 +295,9 @@ export function WechatChannelPanel() {
           <div className="wechat-actions">
             <button className="btn" onClick={installDeps} disabled={busy !== null || status.installing}>
               {status.installing ? "正在安装依赖…" : "安装运行依赖"}
+            </button>
+            <button className="btn btn-ghost" onClick={installRuntime} disabled={busy !== null || status.installing}>
+              下载运行环境
             </button>
             {status.enabled ? (
               <button className="btn btn-danger" onClick={() => void disable()} disabled={busy !== null}>
