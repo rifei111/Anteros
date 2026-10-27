@@ -98,8 +98,50 @@ def load_db() -> Any:
         return STATE.db
 
 
+def alias_lookup(db: Any, value: str) -> Optional[str]:
+    """按**微信号**（contact.alias）反查 wxid。
+
+    上游只公开了按昵称/备注查（username_by_nickname），但人平时记的是微信号
+    （比如 rifei111），不是 wxid_xxx。这里补一条别名查询：先试 contact.alias，
+    退回 search_contact 的唯一命中。查不到就返回 None，由调用方决定怎么提示。
+    """
+    key = (value or "").strip()
+    if not key:
+        return None
+    try:
+        conn = db._contact_conn()  # noqa: SLF001 - 上游没有公开的别名查询接口
+    except Exception as error:  # noqa: BLE001
+        conn = None
+        log(f"取联系人库连接失败：{error}")
+    if conn is not None:
+        try:
+            row = conn.execute(
+                "SELECT username FROM contact WHERE alias = ? COLLATE NOCASE LIMIT 1",
+                (key,),
+            ).fetchone()
+            if row and row[0]:
+                return str(row[0])
+        except Exception as error:  # noqa: BLE001
+            log(f"按微信号查联系人失败（{key}）：{error}")
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - 关不上就算了
+                pass
+    try:
+        rows = db.search_contact(key) or []
+    except Exception as error:  # noqa: BLE001
+        log(f"search_contact 失败（{key}）：{error}")
+        return None
+    for row in rows:
+        username = str(row.get("username") or "")
+        if username and (row.get("alias") or "").lower() == key.lower():
+            return username
+    return None
+
+
 def normalize_username(raw: str) -> str:
-    """把会话标识归一：wxid_* / xxx@chatroom 直接用，其它当成昵称去查。"""
+    """把会话标识归一：wxid_* / xxx@chatroom 直接用，其它先按昵称、再按微信号查。"""
     value = (raw or "").strip() or CHAT_DEFAULT
     if value.startswith("wxid_") or value.endswith("@chatroom") or value == CHAT_DEFAULT:
         return value
@@ -108,10 +150,16 @@ def normalize_username(raw: str) -> str:
         return value
     try:
         resolved = db.username_by_nickname(value)
-        return str(resolved) if resolved else value
+        if resolved:
+            return str(resolved)
     except Exception as error:  # noqa: BLE001
         log(f"昵称转会话标识失败（{value}）：{error}")
-        return value
+    by_alias = alias_lookup(db, value)
+    if by_alias:
+        log(f"按微信号解析会话：{value} → {by_alias}")
+        return by_alias
+    log(f"没解析出会话「{value}」：昵称和微信号都没对上，会去读一个不存在的会话")
+    return value
 
 
 # ----------------------------------------------------------------------------- 体检
@@ -278,7 +326,19 @@ def method_configure(params: Dict[str, Any]) -> Dict[str, Any]:
             except Exception as error:  # noqa: BLE001
                 log(f"取会话标题失败：{error}")
         STATE.chat_title = str(title) if title else None
-        return {"ok": True, "chatUsername": STATE.chat_username, "chatTitle": STATE.chat_title}
+        # resolved：这个会话真的在联系人库里存在吗？不存在就别让界面以为在跟人说话
+        resolved = STATE.chat_title is not None
+        if not resolved and db is not None:
+            try:
+                resolved = bool((db.search_contact(STATE.chat_username) or []))
+            except Exception:  # noqa: BLE001 - 查不到就是没解析出来
+                resolved = False
+        return {
+            "ok": True,
+            "chatUsername": STATE.chat_username,
+            "chatTitle": STATE.chat_title,
+            "resolved": resolved,
+        }
 
 
 def method_poll(params: Dict[str, Any]) -> Dict[str, Any]:
