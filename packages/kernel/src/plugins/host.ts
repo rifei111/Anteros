@@ -397,6 +397,8 @@ export class PluginHost implements PluginHostPort {
         capabilities: [],
         permissions: [],
         grantable: [],
+        grantNeedsConfirm: false,
+        enableNeedsConfirm: false,
         granted: [],
         status: "invalid",
         enabled: false,
@@ -1405,6 +1407,7 @@ export class PluginHost implements PluginHostPort {
       ...issued.filter((issue) => !issue.includes("项密钥")),
     ]);
     if (info === undefined) issues.push("插件目录或文件已不存在，请重新安装或移除该插件");
+    const grantable = unique([...parseJson<string[]>(row.capabilities, []), ...parseJson<string[]>(row.permissions, [])]);
     const status = this.effectiveStatus(row);
     return {
       id: row.id,
@@ -1416,7 +1419,12 @@ export class PluginHost implements PluginHostPort {
       riskLevel: (manifest?.riskLevel ?? row.risk_level) as PluginRisk,
       capabilities: parseJson<string[]>(row.capabilities, []),
       permissions: parseJson<string[]>(row.permissions, []),
-      grantable: unique([...parseJson<string[]>(row.capabilities, []), ...parseJson<string[]>(row.permissions, [])]),
+      grantable,
+      // 授权闸只看「勾选的权限里有没有高危项」，与插件整体 riskLevel 是两回事：
+      // 中风险的 core.llm-router 因为声明 secrets.read:llm.api_key 同样要二次确认。
+      grantNeedsConfirm: grantable.some((permission) => HIGH_RISK_PERMISSION.test(permission)),
+      // 启用闸只认 riskLevel === "high"（见 enable()），两边规则必须一致地暴露给界面。
+      enableNeedsConfirm: (manifest?.riskLevel ?? row.risk_level) === "high",
       granted: this.grants.list(row.id),
       status,
       enabled: row.enabled === 1,

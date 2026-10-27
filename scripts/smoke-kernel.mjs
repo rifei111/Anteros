@@ -303,6 +303,18 @@ try {
   check("高危通道用界面叫法的 token 也能启用", enabledWechat.enabled === true, `status=${enabledWechat.status}`);
 
   const router = plugins.find((item) => item.id === "core.llm-router");
+  check(
+    "中风险插件的授权闸标记正确（授权要确认、启用不用）",
+    router.grantNeedsConfirm === true && router.enableNeedsConfirm === false,
+    `grant=${router.grantNeedsConfirm} enable=${router.enableNeedsConfirm}`,
+  );
+  let routerGrantNeedsToken = false;
+  try {
+    await call("plugins.grant", { id: router.id, permissions: router.grantable });
+  } catch (error) {
+    routerGrantNeedsToken = String(error.message).includes("ECONFIRM");
+  }
+  check("勾了 secrets.read 的中风险插件不带 token 授权会被拒（ECONFIRM）", routerGrantNeedsToken);
   const grantToken = await call("confirm.token", { action: "plugins.grant", target: router.id });
   const grantedRouter = await call("plugins.grant", {
     id: router.id,

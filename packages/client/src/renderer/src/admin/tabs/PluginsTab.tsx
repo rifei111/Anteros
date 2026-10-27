@@ -52,6 +52,12 @@ function statusClass(status: PluginInfo["status"]): string {
 const RISK_ORDER: Record<PluginInfo["riskLevel"], number> = { high: 0, medium: 1, low: 2 };
 
 /**
+ * 与内核 `HIGH_RISK_PERMISSION` 保持一致：勾到这些项就要一次性确认 token。
+ * 别用 riskLevel 代替它——中风险插件声明了 secrets.read 一样要确认。
+ */
+const HIGH_RISK_ITEM = /^(proc\.|secrets\.read:|fs\.write:|ui\.foreground$)/;
+
+/**
  * 插件面板：列表 → 启用/停用 / 逐项授权 / 改配置 / 重启。
  * 高危插件的启用与授权必须二次确认 + confirm.token；默认关闭的会显式标注。
  */
@@ -104,7 +110,7 @@ export function PluginsTab() {
     void run(plugin.id, async () => {
       if (!plugin.enabled) {
         let token: string | undefined;
-        if (plugin.riskLevel === "high") {
+        if (plugin.enableNeedsConfirm) {
           const agreed = await confirm.ask({
             title: `启用高风险插件「${plugin.name}」？`,
             body: (
@@ -150,7 +156,9 @@ export function PluginsTab() {
     setBusyId(plugin.id);
     try {
       let token: string | undefined;
-      if (plugin.riskLevel === "high") {
+      // 授权闸看的是「这一批勾选项里有没有高危项」，不是插件整体风险等级：
+      // 中风险的 core.llm-router 勾了 secrets.read:llm.api_key 就必须带 token。
+      if (grantSelected.some((item) => HIGH_RISK_ITEM.test(item))) {
         const agreed = await confirm.ask({
           title: "授权高风险能力？",
           body: (

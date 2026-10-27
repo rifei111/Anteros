@@ -311,17 +311,55 @@ async function openAdminTab(window: BrowserWindow): Promise<void> {
 /** 自检用：点一个文案里带指定字样的按钮（例如「录入密钥」「授权」），用来截到弹窗。 */
 async function clickSmokeButton(window: BrowserWindow): Promise<void> {
   if (SMOKE_CLICK.length === 0) return;
-  await scriptInPage(
-    window,
-    `(() => {
-      const text = ${JSON.stringify(SMOKE_CLICK)};
-      const button = Array.from(document.querySelectorAll(".admin-panel button"))
-        .find((b) => (b.textContent || "").includes(text));
-      if (button) button.click();
-      return Boolean(button);
-    })()`,
-  );
-  await sleep(1_200);
+  // 用 | 串多步（例如「授权|确认授权|授权」），每步优先点当前弹窗里的按钮
+  for (const text of SMOKE_CLICK.split("|").map((item) => item.trim()).filter((item) => item.length > 0)) {
+    // 「#fill=xxxx」这一步不点按钮，往当前弹窗的第一个输入框里填值（密钥弹窗要它）
+    if (text.startsWith("#fill=")) {
+      const value = text.slice("#fill=".length);
+      await scriptInPage(
+        window,
+        `(() => {
+          const input = document.querySelector(".modal input.input, .modal input");
+          if (!input) return false;
+          const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+          setValue.call(input, ${JSON.stringify(value)});
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          return true;
+        })()`,
+      );
+      await sleep(500);
+      continue;
+    }
+    const clicked = await scriptInPage(
+      window,
+      `(() => {
+        const raw = ${JSON.stringify(text)};
+        const [rowHint, wanted] = raw.includes(">") ? raw.split(">").map((item) => item.trim()) : ["", raw];
+        const scopes = [];
+        if (rowHint.length > 0) {
+          const row = Array.from(document.querySelectorAll("tr")).find((item) =>
+            (item.textContent || "").includes(rowHint),
+          );
+          if (row) scopes.push(row);
+        }
+        const modals = Array.from(document.querySelectorAll(".modal"));
+        for (const modal of modals) scopes.push(modal);
+        scopes.push(document.querySelector(".admin-panel") || document.body);
+        for (const scope of scopes) {
+          const button = Array.from(scope.querySelectorAll("button")).find(
+            (item) => (item.textContent || "").trim() === wanted && !item.disabled,
+          );
+          if (button) {
+            button.click();
+            return true;
+          }
+        }
+        return false;
+      })()`,
+    );
+    console.warn(`[anteros] 自检点击「${text}」：${clicked === true ? "成功" : "没找到"}`);
+    await sleep(1_400);
+  }
 }
 
 /** 自检用：往人设输入框里写一段话并点「编译成人格内核」（真实 input 事件，走 React onChange）。 */

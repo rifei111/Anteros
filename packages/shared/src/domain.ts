@@ -329,6 +329,10 @@ export interface PluginInfo {
   permissions: string[];
   /** 这一份插件里"能被授权"的全部条目 = capabilities + permissions（界面按它逐项勾选） */
   grantable: string[];
+  /** 授权时必须先拿一次性确认 token 吗（勾选里含 proc./secrets.read:/fs.write:/ui.foreground 就是 true，与 riskLevel 无关） */
+  grantNeedsConfirm: boolean;
+  /** 启用时必须先拿一次性确认 token 吗（只有 riskLevel === "high" 才是 true） */
+  enableNeedsConfirm: boolean;
   /** 已授予的能力 */
   granted: string[];
   status: PluginStatus;
