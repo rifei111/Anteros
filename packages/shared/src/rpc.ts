@@ -16,6 +16,7 @@ import type {
   AppSnapshot,
   AuditEntry,
   ChannelInfo,
+  WechatChannelStatus,
   ChatMessage,
   ConsentStatus,
   CostSummary,
@@ -167,6 +168,15 @@ export interface KernelApi {
   "channels.list": MethodSpec<Record<string, never>, ChannelInfo[]>;
   /** 一键停用：停掉所有通道并还原宿主状态（草案 14.6 ⑦）。 */
   "channels.panicStop": MethodSpec<{ confirmToken?: string }, { stopped: string[]; restored: boolean; message: string }>;
+  "channels.wechat.status": MethodSpec<Record<string, never>, WechatChannelStatus>;
+  "channels.wechat.installDeps": MethodSpec<Record<string, never>, WechatChannelStatus>;
+  "channels.wechat.enable": MethodSpec<
+    { ackRisk: boolean; chatUsername?: string },
+    WechatChannelStatus
+  >;
+  "channels.wechat.disable": MethodSpec<Record<string, never>, WechatChannelStatus>;
+  "channels.wechat.setChat": MethodSpec<{ chatUsername: string }, WechatChannelStatus>;
+  "channels.wechat.doctor": MethodSpec<{ action: "dump-account" | "diagnose-keys" }, { ok: boolean; output: string }>;
 
   "world.state": MethodSpec<Record<string, never>, WorldState>;
   "drives.state": MethodSpec<Record<string, never>, DriveState>;
@@ -361,6 +371,8 @@ export interface KernelEvents {
   /** 插件运行环境的下载/安装/更新进度（界面拿它画进度条）。 */
   "event.runtime": PluginRuntimeStatus;
   "event.channels": ChannelInfo[];
+  "event.wechat": WechatChannelStatus;
+  "event.wechat.log": { line: string };
   "event.consent": ConsentStatus;
   "event.cost": CostSummary;
   "event.health": { degraded: Array<{ pluginId: string; reason: string }> };

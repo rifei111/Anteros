@@ -101,7 +101,7 @@ for (const version of Object.keys(runtimeFileSets)) {
 }
 const downloadHits = [];
 let feedVersion = "1.0.0";
-const feedState = { pluginId: "channel.wechat-replica" };
+const feedState = { pluginId: "core.media" };
 const localFeedServer = createServer((request, response) => {
   const url = request.url ?? "/";
   if (url === "/feed.json") {
@@ -228,7 +228,11 @@ function handle(line) {
     const call = pending.get(String(message.id));
     pending.delete(String(message.id));
     clearTimeout(call.timer);
-    if (message.error) call.reject(new Error(`${message.error.message}（${message.error.data?.code ?? "?"}）`));
+    if (message.error) {
+      const failure = new Error(`${message.error.message}（${message.error.data?.code ?? "?"}）`);
+      failure.code = message.error.data?.code;
+      call.reject(failure);
+    }
     else call.resolve(message.result);
     return;
   }
@@ -293,10 +297,10 @@ try {
   const snapshot = await call("state.snapshot");
   check("快照含人格", typeof snapshot.persona?.name === "string" && snapshot.persona.name.length > 0, `name=${snapshot.persona?.name}`);
   check("快照含关系阶段", snapshot.relation?.stage === "stranger", `stage=${snapshot.relation?.stage}`);
-  check("持久化插件已注册", Array.isArray(snapshot.plugins) && snapshot.plugins.length >= 7, `plugins=${snapshot.plugins?.length}`);
+  check("持久化插件已注册", Array.isArray(snapshot.plugins) && snapshot.plugins.length >= 6, `plugins=${snapshot.plugins?.length}`);
   check(
-    "高风险通道默认禁用",
-    snapshot.plugins.some((plugin) => plugin.kind === "channel" && plugin.enabled === false),
+    "需要密钥的插件默认不启用",
+    snapshot.plugins.some((plugin) => plugin.id === "core.llm-router" && plugin.enabled === false),
   );
   check("App 内通道始终可用", snapshot.channels.some((channel) => channel.enabled === true && channel.writeReady === true));
   check("LLM 未配置时明示降级而不是假装在线", snapshot.llm.online === false && snapshot.llm.degradedLocalEcho === true);
@@ -389,27 +393,27 @@ try {
 
   /* 14. 插件授权与启用：界面用 plugins.* 叫法换 token、宿主按 plugin.* 消费，必须能对上 */
   const plugins = await call("plugins.list");
-  const wechat = plugins.find((item) => item.id === "channel.wechat-replica");
+  const media = plugins.find((item) => item.id === "core.media");
   check(
     "插件清单带可授权项与缺密钥字段",
-    Array.isArray(wechat?.grantable) && Array.isArray(wechat?.missingSecrets) && Array.isArray(wechat?.secrets),
+    Array.isArray(media?.grantable) && Array.isArray(media?.missingSecrets) && Array.isArray(media?.secrets),
   );
-  const wechatGrantToken = await call("confirm.token", { action: "plugins.grant", target: wechat.id });
-  const grantedWechat = await call("plugins.grant", {
-    id: wechat.id,
-    permissions: wechat.grantable,
-    confirmToken: wechatGrantToken.token,
+  check("声明了密钥的插件在缺密钥时如实列出", Array.isArray(media?.missingSecrets) && media.missingSecrets.includes("media.api_key"), JSON.stringify(media?.missingSecrets ?? []));
+  const mediaGrantToken = await call("confirm.token", { action: "plugins.grant", target: media.id });
+  const grantedMedia = await call("plugins.grant", {
+    id: media.id,
+    permissions: media.grantable,
+    confirmToken: mediaGrantToken.token,
   });
-  check("高危通道按 grantable 授权（含 channel.lease）", grantedWechat.granted.includes("channel.lease"));
-  // v0.6 起：需要外部运行环境的插件，没装运行环境时启用闸直接拦下来（而不是拉起一个注定 blocked 的进程）
-  const enableTokenEarly = await call("confirm.token", { action: "plugins.enable", target: wechat.id });
-  let runtimeGateError = "";
+  check("按 grantable 授权成功", Array.isArray(grantedMedia.granted) && grantedMedia.granted.length > 0, JSON.stringify(grantedMedia.granted));
+  // 缺密钥时启用会被拦（core.media 声明了 media.api_key，这里还没录）
+  let secretGateError = "";
   try {
-    await call("plugins.enable", { id: wechat.id, confirmToken: enableTokenEarly.token });
+    await call("plugins.enable", { id: media.id });
   } catch (error) {
-    runtimeGateError = String(error && error.message ? error.message : error);
+    secretGateError = String(error && error.message ? error.message : error);
   }
-  check("没装运行环境时启用被拦（提示先下载运行环境）", runtimeGateError.includes("运行环境"), runtimeGateError.slice(0, 60));
+  check("缺密钥时启用被拦并说清缺什么", secretGateError.includes("密钥"), secretGateError.slice(0, 80));
 
   const router = plugins.find((item) => item.id === "core.llm-router");
   check(
@@ -481,7 +485,7 @@ try {
   check("审计里不出现消息正文", Array.isArray(audit) && !audit.some((entry) => JSON.stringify(entry).includes("今天有点累")));
 
   /* 17. 插件运行环境：检查 → 下载（按文件增量）→ 落地 → 再升级只下变了的那几个文件 → 卸载 */
-  const runtimeId = "channel.wechat-replica";
+  const runtimeId = "core.media";
   const runtime0 = await call("plugins.runtime.status", { id: runtimeId });
   check("运行环境初始未安装", runtime0.installed === null, "installed=" + JSON.stringify(runtime0.installed));
   check("运行环境状态带上更新源", runtime0.feedUrl.includes("/feed.json"), runtime0.feedUrl);
@@ -525,27 +529,32 @@ try {
   const runtimeGone = await call("plugins.runtime.uninstall", { id: runtimeId });
   check("卸载后状态清空、目录删掉", runtimeGone.installed === null && !fs.existsSync(runtimeInstalled2.installed?.path ?? ""));
 
-  /* 18. 下载运行环境后插件真的就绪：装运行环境 → 授权 → 启用 → 体检 ok（骨架就绪，不是假装接通） */
-  feedVersion = "1.0.0";
-  await call("plugins.runtime.install", { id: runtimeId });
-  const enableToken = await call("confirm.token", { action: "plugins.enable", target: wechat.id });
-  const enabledWechat = await call("plugins.enable", { id: wechat.id, confirmToken: enableToken.token });
-  check("装好运行环境后用界面叫法的 token 能启用", enabledWechat.enabled === true, `status=${enabledWechat.status}`);
-  const wechatHealth = enabledWechat.health;
+  /* 19. 内置微信通道（软件本体能力，不是插件）：默认关闭、没确认风险不许开、缺环境时诚实报告 */
+  const wechatStatus0 = await call("channels.wechat.status");
+  check("内置通道默认关闭", wechatStatus0.enabled === false && wechatStatus0.state === "off", `state=${wechatStatus0.state}`);
+  check("内置通道体检项不为空", Array.isArray(wechatStatus0.checks) && wechatStatus0.checks.length >= 3, `checks=${wechatStatus0.checks?.length}`);
+  const builtinChannel = (await call("channels.list")).find((item) => item.pluginId === "core.wechat-channel");
   check(
-    "启用后插件体检是 ok（适配器骨架在跑）",
-    wechatHealth !== null && wechatHealth.ok === true && wechatHealth.status === "ok",
-    `health=${JSON.stringify(wechatHealth)}`,
+    "通道列表里有内置微信通道且写能力未就绪",
+    builtinChannel !== undefined && builtinChannel.kind === "external" && builtinChannel.writeReady === false,
+    JSON.stringify(builtinChannel?.capabilities ?? null),
   );
-  check(
-    "体检文案说清「骨架就绪、未接入本体」",
-    typeof wechatHealth?.message === "string" && wechatHealth.message.includes("骨架已就绪") && wechatHealth.message.includes("未接入"),
-    wechatHealth?.message ?? "",
-  );
-  const channelsAfter = await call("channels.list");
-  const wechatChannel = channelsAfter.find((item) => item.pluginId === "channel.wechat-replica");
-  check("通道列表里它仍然不是可写通道（骨架≠接通）", wechatChannel !== undefined && wechatChannel.writeReady === false);
-
+  let ackRejected = false;
+  try {
+    await call("channels.wechat.enable", { ackRisk: false });
+  } catch (error) {
+    ackRejected = error.code === "EINVALID";
+  }
+  check("不确认风险不许开启（EINVALID）", ackRejected);
+  let doctorBlocked = false;
+  try {
+    await call("channels.wechat.doctor", { action: "diagnose-keys" });
+  } catch (error) {
+    doctorBlocked = error.code === "EBLOCKED";
+  }
+  check("通道没跑时诊断被拒（EBLOCKED）", doctorBlocked);
+  const wechatChat = await call("channels.wechat.setChat", { chatUsername: "filehelper" });
+  check("能设置白名单会话", wechatChat.chatUsername === "filehelper");
 } catch (error) {
   check("端到端流程", false, error.message);
 } finally {

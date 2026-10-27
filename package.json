@@ -1,6 +1,6 @@
 {
   "name": "anteros",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "description": "Anteros：一台 Windows 电脑上跑通的拟人智能体单机闭环（内核 + Windows 主客户端 + 插件）。",
   "license": "MIT",

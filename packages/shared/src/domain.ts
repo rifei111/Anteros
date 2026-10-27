@@ -436,6 +436,45 @@ export interface ChannelInfo {
   health: PluginHealth | null;
 }
 
+/** 内置微信通道的一项环境体检（内核自己探 Python / 微信 / sidecar，不靠插件自吹）。 */
+export interface WechatCheck {
+  id: string;
+  label: string;
+  state: "ok" | "warn" | "fail";
+  message: string;
+  hint?: string;
+}
+
+/**
+ * 内置微信通道的状态快照。
+ *
+ * 这条通道是软件本体的一部分（不是插件）：默认关闭，用户在管理面板里点了风险确认才开。
+ * sidecar 是一个 Python 子进程，负责读本机微信数据库、驱动微信界面发消息。
+ */
+export interface WechatChannelStatus {
+  enabled: boolean;
+  running: boolean;
+  state: "off" | "starting" | "ready" | "degraded" | "blocked" | "error";
+  checks: WechatCheck[];
+  account: { wxid: string; nickname: string | null } | null;
+  /** 只跟这一个会话说话（白名单），默认 filehelper（文件传输助手） */
+  chatUsername: string;
+  chatTitle: string | null;
+  canRead: boolean;
+  canSend: boolean;
+  pythonPath: string | null;
+  sidecarVersion: string | null;
+  wechatautoVersion: string | null;
+  lastError: string | null;
+  lastInboundTs: number | null;
+  lastOutboundTs: number | null;
+  inboundCount: number;
+  outboundCount: number;
+  installing: boolean;
+  installLog: string[];
+  /** 上次体检完成的时间（0 = 还没体检过） */
+  lastCheckTs: number;
+}
 export type ActionState = "queued" | "quarantined" | "dispatched" | "cancelled" | "expired";
 
 export interface ActionItem {

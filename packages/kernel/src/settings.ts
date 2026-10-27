@@ -17,6 +17,14 @@ export interface SettingsDefaults {
   "life.allowOwnRoutine": boolean;
   "system.proactivePaused": boolean;
   "system.panicUntilTs": number;
+  /** 内置微信通道：默认关闭，用户在通道页确认风险后才开 */
+  "wechat.enabled": boolean;
+  /** 只跟这一个会话说话（白名单），默认文件传输助手 */
+  "wechat.chatUsername": string;
+  /** 用户自己指定 Python 解释器路径（留空则自动找 python/py） */
+  "wechat.pythonPath": string;
+  /** 通道页展示用：上次体检时间 */
+  "wechat.lastCheckTs": number;
 }
 
 export const DEFAULT_SETTINGS: SettingsDefaults = {
@@ -33,6 +41,10 @@ export const DEFAULT_SETTINGS: SettingsDefaults = {
   "life.allowOwnRoutine": false,
   "system.proactivePaused": false,
   "system.panicUntilTs": 0,
+  "wechat.enabled": false,
+  "wechat.chatUsername": "filehelper",
+  "wechat.pythonPath": "",
+  "wechat.lastCheckTs": 0,
 };
 
 export class SettingsService {

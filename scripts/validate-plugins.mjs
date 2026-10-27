@@ -13,7 +13,7 @@
  *    字段清单若有更新必须同步；脚本会在 dist 存在时自动使用真源，降低漂移风险。
  * 3. 内置插件额外约定（shared schema 不表达、由宿主读原始 JSON）：
  *    - `enabled` 必须是布尔；高危插件必须 false（默认禁用）；
- *    - 7 个内置插件必须存在，且 kind/risk/capabilities 与草案 14.14.2 清单一致；
+ *    - 6 个内置插件必须存在（微信通道自 v0.7.0 起是软件本体能力，不再是插件），且 kind/risk/capabilities 与草案 14.14.2 清单一致；
  *    - entry 必须是插件目录内的相对文件（宿主按 path.join(pluginDir, command) 解析，
  *      绝对路径会逃出目录，必须在此拒绝）；
  *    - 高危通道插件不得出现内存补丁/注入类原生调用（红线，草案 14.6/14.7）。
@@ -72,15 +72,6 @@ const REQUIRED_BUILTINS = {
     enabled: true,
     capabilities: ["ui.panel"],
     permissions: ["kernel.config"],
-  },
-  "channel.wechat-replica": {
-    kind: "channel",
-    risk: "high",
-    enabled: false,
-    capabilities: ["channel.read", "channel.history", "channel.write", "channel.lease", "channel.media"],
-    permissions: ["proc.read:Weixin.exe", "proc.patch:Weixin.exe", "ui.foreground"],
-    // fs.read:<本机微信数据目录> 的路径因机器而异，这里只要求存在一条 fs.read: 声明
-    permissionsPrefix: ["fs.read:"],
   },
 };
 

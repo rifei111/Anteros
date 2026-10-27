@@ -43,6 +43,8 @@ export class ChatService {
     eventId?: string;
     clientTs?: number;
     presence?: { isTyping?: boolean; appFocused?: boolean; lastInteractionMs?: number };
+    /** 每发出一条分条时回调（内置外部通道用它把话转出去；客户端不用传） */
+    onPart?: (text: string, index: number) => void;
   }): Promise<ChatReplyResult> {
     const { deps, consent } = this.parts;
     consent.requireConsent("app");
@@ -138,6 +140,13 @@ export class ChatService {
           delayAfterMs: part.delayAfterMs,
           typingMs: part.typingMs,
         });
+        if (input.onPart) {
+          try {
+            input.onPart(part.text, index);
+          } catch (callbackError) {
+            deps.log.warn(`onPart 回调失败：${(callbackError as Error)?.message ?? String(callbackError)}`);
+          }
+        }
         if (index < plan.parts.length - 1) await sleep(part.delayAfterMs);
       }
       ports.emit("event.typing", { state: "stop" });

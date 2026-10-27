@@ -30,7 +30,6 @@ const repoOnly = argv.has("--repo-only");
 const allowMissingInstaller = repoOnly || argv.has("--allow-missing-installer");
 
 const REQUIRED_PLUGINS = [
-  "channel.wechat-replica",
   "core.dashboard",
   "core.llm-router",
   "core.media",
@@ -336,6 +335,13 @@ function checkInstallerEntries(predicate, where) {
   }
   if (pluginCount === REQUIRED_PLUGINS.length) {
     ok(`安装包内含 ${pluginCount} 个内置插件（${where}）`, "resources/plugins/<id>/plugin.json");
+  }
+
+  // v0.7.0：微信通道改成软件本体自带的能力，旁路进程（Python sidecar）随包走
+  if (predicate("integrations/wechatauto-sidecar/sidecar.py")) {
+    ok(`安装包内含内置微信通道的旁路进程（${where}）`, "resources/integrations/wechatauto-sidecar/sidecar.py");
+  } else {
+    err(`安装包内缺少内置微信通道的旁路进程（${where}）`, "检查 extraResources: ../../integrations → integrations");
   }
 }
 

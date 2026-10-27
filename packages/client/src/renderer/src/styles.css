@@ -2522,3 +2522,123 @@ ul {
   font-size: 12px;
   color: #2f6b45;
 }
+/* ---------- 内置微信通道（软件本体能力，不是插件） ---------- */
+.wechat-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.wechat-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-soft);
+}
+.wechat-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+.wechat-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wechat-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.wechat-check-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+.wechat-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-soft);
+}
+.wechat-block-title {
+  font-size: 13px;
+  font-weight: 700;
+}
+.wechat-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.wechat-install-log,
+.wechat-doctor {
+  width: 100%;
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #101216;
+  color: #d8dee9;
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.wechat-chat-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.risk-box {
+  border-color: #b45309;
+  background: #2a1c0d;
+}
+.risk-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.risk-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.risk-checkbox {
+  margin-top: 2px;
+  width: 15px;
+  height: 15px;
+  accent-color: #d97706;
+}
+.row-gap {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.small {
+  font-size: 12px;
+}
+.btn-link {
+  margin-left: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #6ea8fe;
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 12px;
+}

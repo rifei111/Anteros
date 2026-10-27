@@ -240,3 +240,39 @@ New version 0.6.1 has been downloaded to ...\pending\Anteros-Setup-0.6.1-x64.exe
 - 界面：插件卡片里「下载运行环境并启用」一键走完 安装 → 授权 → 启用；只下载不启用也行。
 
 冒烟覆盖：第 18 组（装运行环境 → 启用 → `health.ok` → 文案含「骨架已就绪」「未接入」→ `channels.list` 里 `writeReady === false`）。
+
+## 15. v0.7.0 增补（内置微信通道：软件本体自带、默认关闭）
+
+### 15.1 架构
+
+- 通道不再以插件形式存在：`channel.wechat-replica` 已删除，改为内核自带的 `WechatChannelService`（`packages/kernel/src/services/wechat.ts`）。
+- 真正的行动方是 Python sidecar（`integrations/wechatauto-sidecar/sidecar.py`，零依赖即可启动），它调 `wechatauto-replica` 读本机微信数据库（SQLCipher 解密）并驱动微信界面发消息。
+- 内核 ↔ sidecar 走 stdio + NDJSON JSON-RPC；sidecar 崩了只会让这条通道 `error`，App 内对话不受影响。
+- 打包时 `integrations/` 进 `extraResources`；开发期用 `__dirname` 向上四级定位仓库根。
+- 业务代码仍然不含按通道名分支的逻辑：`check-boundaries` 只对适配器文件（`services/wechat.ts`）、组合根装配（`app.ts`/`settings.ts`）与契约声明（`shared/rpc.ts`/`domain.ts`）做行级放行。
+
+### 15.2 默认关闭 + 风险确认
+
+- 默认 `wechat.enabled=false`，通道页状态「已关闭」。
+- 开启必须勾满 5 条风险确认（读本机微信数据库、驱动界面、可能违反平台条款/封号、只接白名单会话、随时可关），少一条 `EINVALID`。
+- 二次确认 token 走 `permissions.createConfirm/consumeConfirm`，动作名 `channels.wechat.enable`。
+- 白名单会话默认 `filehelper`（文件传输助手）：既不会发错人，也能看到它发出什么。
+- 一键停用（`channels.panicStop`）会 `disable()` 这条通道。
+
+### 15.3 体检与诚实边界
+
+体检五项（`wechat.refresh`，不启动 sidecar 也能跑）：
+
+1. Python 解释器：设置里指定 > 环境变量 > `py -3` > `python` > `python3`，只认 64 位 3.10+。
+2. 适配库 `wechatauto`：可一键 `wechat.installDeps`（`python -m pip install wechatauto-replica`），输出实时进界面日志。
+3. 微信桌面版安装（4.x）：只做存在性判断，不读数据库。
+4. 微信进程：没登录就明确说「读不到登录状态」，不假装就绪。
+5. 旁路进程：`sidecar.py` 是否在安装目录。
+
+读/发能力分开报告：`canRead` / `canSend`；没就绪时 `read_since` / `send` 一律 `EBLOCKED`，不会伪造已发送。
+`typingIsReal=false`：不会假装「正在输入」；`hostOccupancyMs` 标明它要占用桌面焦点几秒。
+
+### 15.4 验证范围（如实说明）
+
+- 已验证：内核侧 71 项冒烟全过（默认关闭、体检项非空、通道列表里有内置通道且 `writeReady=false`、不确认风险不许开、没跑起来时诊断被拒、白名单可设）、客户端面板渲染与依赖安装/开启/诊断/保存四类操作走通、打包产物含 `resources/integrations/wechatauto-sidecar`。
+- **未验证**：真实微信收发。本机没有可用 Python，也没有 `wechatauto-replica` 运行环境；端到端「读消息 → 进记忆 → 回复 → 发出去」需要在装好 Python 与依赖、登录微信 4.x 后由用户实测。

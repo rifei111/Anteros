@@ -677,7 +677,12 @@ if (!gotLock) {
     // 默认 %APPDATA%\Anteros；可用 ANTEROS_DATA_DIR 覆盖（自检/CI 隔离数据）
     const dataDir = resolveDataDir();
     // 开发期：仓库根 plugins/；打包后：resources/plugins
-    const pluginsDir = app.isPackaged
+    // 内置微信通道的 sidecar 目录：打包后在 resources/integrations，开发期在仓库根 integrations
+  // （开发期不能用 app.getAppPath()：跑 out/main/index.cjs 时它指向脚本目录，算出来会差两级）
+  process.env.ANTEROS_WECHAT_SIDECAR_DIR = app.isPackaged
+    ? join(process.resourcesPath, "integrations", "wechatauto-sidecar")
+    : join(__dirname, "..", "..", "..", "..", "integrations", "wechatauto-sidecar");
+  const pluginsDir = app.isPackaged
       ? join(process.resourcesPath, "plugins")
       : join(__dirname, "../../../../plugins");
 

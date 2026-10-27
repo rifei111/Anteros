@@ -14,9 +14,24 @@ const root = process.cwd();
 const scopes = ["packages/kernel/src", "packages/shared/src"];
 const banned = [/wechat/i, /微信/];
 /** 整文件放行：声明闸文案（版本化法务文本，必须点名外部通道） */
-const allowFiles = [/[\\/]channel[\\/]/, /plugin-manifest/, /packages[\\/]shared[\\/]src[\\/]consent\.ts$/];
+const allowFiles = [
+  /[\\/]channel[\\/]/,
+  /plugin-manifest/,
+  /packages[\\/]shared[\\/]src[\\/]consent\.ts$/,
+  // v0.7.0 起内置微信通道是软件本体能力（不是插件）：适配器本体可以点名，但它不参与业务分支。
+  /packages[\\/]kernel[\\/]src[\\/]services[\\/]wechat\.ts$/,
+];
 /** 行级放行：规范 1 owners 表列名与草案 2.9 的构建期环境变量 */
 const allowLines = [/\bwechat_id\b/i, /OWNER_WECHAT_ID/, /\bownerWechatConfigured\b/];
+/**
+ * 按文件行级放行：内置通道的类型契约（shared）与组合根装配（app.ts、settings 默认值）
+ * 只是把这条能力接起来，不含"按通道名分支"的业务逻辑。
+ */
+const allowLineByFile = [
+  { file: /packages[\\/]kernel[\\/]src[\\/]app\.ts$/, line: /wechat|微信/i },
+  { file: /packages[\\/]kernel[\\/]src[\\/]settings\.ts$/, line: /wechat|微信/i },
+  { file: /packages[\\/]shared[\\/]src[\\/](rpc|domain)\.ts$/, line: /wechat|微信/i },
+];
 
 let violations = 0;
 async function walk(dir) {
@@ -35,11 +50,13 @@ async function walk(dir) {
     if (!/\.(ts|js|mjs)$/.test(entry.name)) continue;
     const rel = relative(root, full);
     if (allowFiles.some((re) => re.test(rel))) continue;
+    const perFile = allowLineByFile.find((entry) => entry.file.test(rel));
     const text = await readFile(full, "utf8");
     text.split(/\r?\n/).forEach((line, i) => {
       const hit = banned.some((re) => re.test(line));
       if (!hit) return;
       if (allowLines.some((re) => re.test(line))) return;
+      if (perFile !== undefined && perFile.line.test(line)) return;
       violations += 1;
       console.error(`${rel}:${i + 1}: 业务代码不得出现通道名 -> ${line.trim()}`);
     });

@@ -19,6 +19,9 @@ extraResources:
     to: kernel
   - from: ../../plugins
     to: plugins
+  # 内置微信通道的旁路进程（Python sidecar）随包走；用户仍然要自己装 Python 与 wechatauto-replica
+  - from: ../../integrations
+    to: integrations
 asar: true
 asarUnpack:
   - resources/**

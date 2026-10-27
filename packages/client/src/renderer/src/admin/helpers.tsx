@@ -15,6 +15,8 @@ export interface Loaded<T> {
   loading: boolean;
   error: string | null;
   reload: () => void;
+  /** 有些面板会在局部操作后直接刷新到最新快照，避免整块重挂载 */
+  setData: (value: T) => void;
 }
 
 /** 通用只读加载：挂载与依赖变化时重新请求，失败给人话并 toast。 */
@@ -52,7 +54,7 @@ export function useLoad<T>(loader: () => Promise<T>, deps: readonly unknown[]): 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick, ...deps]);
 
-  return { data, loading, error, reload: () => setTick((value) => value + 1) };
+  return { data, loading, error, reload: () => setTick((value) => value + 1), setData };
 }
 
 /** 把任意错误变成一条顶部 toast（不弹原生 alert）。 */

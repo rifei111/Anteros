@@ -5,6 +5,7 @@ import { invoke } from "../../lib/kernel";
 import { PLUGIN_STATUS_LABEL, labelOf } from "../../lib/labels";
 import { pushToast } from "../../lib/store";
 import { LoadingLine, Section, reportError, requestToken, useLoad } from "../helpers";
+import { WechatChannelPanel } from "../WechatChannel";
 
 function channelRiskLabel(risk: ChannelInfo["capabilities"]["riskLevel"]): string {
   switch (risk) {
@@ -73,6 +74,8 @@ export function ChannelsTab() {
   return (
     <div className="panel-stack">
       {confirm.node}
+
+      <WechatChannelPanel />
 
       <Section
         title="外部通道"

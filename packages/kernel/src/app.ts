@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { KERNEL_API_VERSION, PIPE_PREFIX, AnterosError, ERROR_CODES } from "@anteros/shared";
 import type {
   AppSnapshot,
+  ChannelInfo,
   HandshakeResult,
   LlmStatus,
   Persona,
@@ -28,6 +29,7 @@ import { MindService } from "./mind/service.js";
 import { ExpressionService } from "./expression/service.js";
 import { PluginService } from "./services/plugins.js";
 import { ChannelService } from "./services/channels.js";
+import { WechatChannelService } from "./services/wechat.js";
 import { ExportService } from "./services/export.js";
 import { SystemService } from "./services/system.js";
 import { ChatService } from "./services/chat.js";
@@ -79,6 +81,7 @@ export class App {
   private readonly system: SystemService;
   private readonly chat: ChatService;
   private readonly proactive: ProactiveService;
+  private readonly wechat: WechatChannelService;
   private readonly startedTs = Date.now();
   private readonly sessionId: string;
   private emit: Emitter = () => undefined;
@@ -123,6 +126,18 @@ export class App {
         }),
     };
     this.chat = new ChatService({ deps: this.deps, ports, consent: runtime.consent, cost: runtime.cost, audit: runtime.audit });
+    this.wechat = new WechatChannelService(this.deps, runtime.settings, runtime.audit, runtime.consent, runtime.permissions, {
+      emit: (method, params) => this.emit(method, params),
+      // 收到白名单会话的消息：当成用户说的话走同一套对话编排，agent 的每条分条再转回微信
+      onInbound: async ({ text, externalId }) => {
+        await this.chat.send({
+          text,
+          eventId: `wechat:${externalId}`,
+          onPart: (part) => this.wechat.send(part),
+        });
+      },
+      sendOutbound: (text) => this.wechat.send(text),
+    });
     this.proactive = new ProactiveService(this.deps, ports, runtime.consent, runtime.cost, runtime.settings);
     this.proactive.start();
   }
@@ -139,6 +154,7 @@ export class App {
   async start(): Promise<void> {
     try {
       await this.plugins.start();
+      void this.wechat.boot();
       this.deps.log.info?.(`plugin host started: ${this.plugins.list().filter((item) => item.status === "running").length} running`);
     } catch (error) {
       this.deps.log.warn?.(`plugin host start failed: ${(error as Error).message}`);
@@ -407,13 +423,34 @@ export class App {
 
       /* ---------------- 通道 ---------------- */
       case "channels.list":
-        return this.channels.list();
+        return this.channelsWithBuiltin();
       case "channels.panicStop": {
         this.runtime.permissions.assertOwner("一键停用");
         const result = await this.plugins.panicStop();
         this.runtime.audit.log("channels.panic_stop", { actorRole: "owner", after: result });
         this.emit("event.channels", this.channels.list());
         return result;
+      }
+      case "channels.wechat.status":
+        return this.wechat.refresh();
+      case "channels.wechat.installDeps":
+        return this.wechat.installDeps();
+      case "channels.wechat.enable": {
+        const input = (params ?? {}) as { ackRisk?: unknown; chatUsername?: unknown };
+        return this.wechat.enable({
+          ackRisk: input.ackRisk === true,
+          chatUsername: typeof input.chatUsername === "string" ? input.chatUsername : undefined,
+        });
+      }
+      case "channels.wechat.disable":
+        return this.wechat.disable();
+      case "channels.wechat.setChat": {
+        const input = (params ?? {}) as { chatUsername?: unknown };
+        return this.wechat.setChat(String(input.chatUsername ?? ""));
+      }
+      case "channels.wechat.doctor": {
+        const input = (params ?? {}) as { action?: unknown };
+        return this.wechat.doctor(input.action === "dump-account" ? "dump-account" : "diagnose-keys");
       }
 
       /* ---------------- 世界 / 动机 / 主动 ---------------- */
@@ -545,7 +582,11 @@ export class App {
     }
   }
 
-  async shutdown(): Promise<void> {
+  async shutdown(): Promise<void> {    try {
+      await this.wechat.shutdown();
+    } catch (error) {
+      this.deps.log.warn(`内置微信通道关闭失败：${(error as Error)?.message ?? String(error)}`);
+    }
     if (this.shuttingDown) return;
     this.shuttingDown = true;
     this.proactive.stop();
@@ -573,6 +614,45 @@ export class App {
     };
   }
 
+  /**
+   * 通道列表 = 插件通道 + 内置微信通道。
+   * 内置通道是软件本体的一部分，没有 manifest、不靠插件自吹，状态由内核自己探。
+   */
+  private channelsWithBuiltin(): ChannelInfo[] {
+    const wechat = this.wechat.status();
+    const attached = wechat.state === "ready";
+    return [
+      ...this.channels.list(),
+      {
+        pluginId: "core.wechat-channel",
+        displayName: "微信（内置通道）",
+        kind: "external",
+        capabilities: {
+          readCanBackfill: true,
+          // 写路径要 GUI 驱动，能发但不可打包票：就绪与否看 attachments
+          writeIsDeterministic: attached,
+          typingIsReal: false,
+          canRecall: false,
+          hostOccupancyMs: 3_000,
+          riskLevel: "red",
+        },
+        enabled: wechat.enabled,
+        status: wechat.running ? "running" : wechat.enabled ? "blocked" : "disabled",
+        writeReady: attached && wechat.canSend,
+        health: {
+          ok: attached,
+          status: attached ? "ok" : wechat.enabled ? "blocked" : "degraded",
+          message: wechat.running
+            ? `内置通道运行中（${wechat.chatTitle ?? wechat.chatUsername}），读 ${wechat.canRead ? "可以" : "未就绪"}、发 ${wechat.canSend ? "可以" : "未就绪"}`
+            : wechat.enabled
+              ? `内置通道已开启但没跑起来：${wechat.lastError ?? "看体检项"}`
+              : "内置通道默认关闭：在「通道」页点开启并确认风险后才读本机微信数据",
+          checkedTs: Date.now(),
+          attachments: { read: wechat.canRead, write: wechat.canSend, typing: false, recall: false },
+        },
+      },
+    ];
+  }
   private snapshot(): AppSnapshot {
     const now = Date.now();
     return {
@@ -584,7 +664,7 @@ export class App {
       world: this.mind.getWorld(now),
       drives: this.mind.getDrives(),
       plugins: this.plugins.list() as PluginInfo[],
-      channels: this.channels.list(),
+      channels: this.channelsWithBuiltin(),
       cost: this.runtime.cost.summary(),
       health: this.health(),
       llm: this.llmStatus(),
