@@ -111,7 +111,10 @@ export class App {
     this.channels = new ChannelService(this.deps, this.plugins);
     this.exporter = new ExportService(this.deps, { dataDir: runtime.dataDir });
     this.system = new SystemService(this.deps, { plugins: this.plugins, channels: this.channels });
-    this.reset = new ResetService(this.deps.db, runtime.dataDir, runtime.logger.child("reset"));
+    this.reset = new ResetService(this.deps.db, runtime.dataDir, runtime.logger.child("reset"), {
+      extraRuntimeDirs: ["wechat-runtime"],
+      extraSettingPrefixes: [{ prefix: "wechat.", label: "运行环境" }],
+    });
 
     const ports: ChatDeps = {
       deps: this.deps,
@@ -144,8 +147,15 @@ export class App {
       dataDir: this.runtime.dataDir,
     });
     this.proactive = new ProactiveService(this.deps, ports, runtime.consent, runtime.cost, runtime.settings);
-    // 主动消息的第二个出口：只在开关打开时才真的发到微信
-    this.proactive.setRelay((text) => this.wechat.sendAsync(text));
+    // 主动消息的第二个出口：通道可用且开关打开时才真的发出去（判断逻辑留在通道层）
+    this.proactive.setRelay({
+      deliver: (text) => this.wechat.sendAsync(text),
+      enabled: () => {
+        const status = this.wechat.status();
+        return status.enabled && status.relayProactive;
+      },
+      ready: () => this.wechat.status().state === "ready",
+    });
     this.proactive.start();
   }
 
@@ -761,7 +771,7 @@ export class App {
   private proactiveSummary(): ProactiveSummary {
     const base = this.proactive.summary();
     const wechat = this.wechat.status();
-    return { ...base, relayToWechat: wechat.enabled && wechat.relayProactive, wechatReady: wechat.state === "ready" };
+    return { ...base, relayToExternal: wechat.enabled && wechat.relayProactive, externalReady: wechat.state === "ready" };
   }
 
   /** 头像存在 settings 里（data URL）；空字符串对外统一成 null，界面就知道回退首字。 */

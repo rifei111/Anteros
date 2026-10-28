@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useConfirm } from "../../components/Modal";
 import { formatBytes } from "../../lib/format";
 import { invoke, pickFile, revealFile } from "../../lib/kernel";
+import { reloadChatView, refreshSnapshot } from "../../lib/app";
 import { applyProactiveSummary, pushToast } from "../../lib/store";
 import { LoadingLine, Section, reportError, requestToken, useLoad } from "../helpers";
 
@@ -26,7 +27,8 @@ export function DataTab() {
   const stats = useLoad(() => invoke("memory.stats", {}), []);
   const confirm = useConfirm();
   const [busy, setBusy] = useState<"export" | "import" | "reset-memory" | "reset-data" | "uninstall" | null>(null);
-  const [keepChat, setKeepChat] = useState(true);
+  // 语义统一成「要不要把聊天记录一起清掉」：勾上=清（默认），不勾=只清记忆留着聊天
+  const [clearChat, setClearChat] = useState(true);
   const [keepOptions, setKeepOptions] = useState<ResetOptions>({ keepApiKey: true, keepRuntime: true, keepPlugins: true });
   const [keepDataOnUninstall, setKeepDataOnUninstall] = useState(true);
 
@@ -99,7 +101,9 @@ export function DataTab() {
         <div>
           <p>
             会清掉它记住的 {total} 条记忆、未闭合话题和叙事槽位
-            {keepChat ? "，并清空全部聊天记录（推荐：只清记忆它会从聊天记录里重新想起来）" : "，但保留聊天记录"}。
+            {clearChat
+              ? "，并清空全部聊天记录（推荐：只清记忆的话，它会从聊天记录里重新想起来）"
+              : "，但保留聊天记录（它还能从聊天记录里想起这些事）"}。
           </p>
           <p className="danger-text">不可撤销。人格设定、插件、你的密钥都保留。</p>
         </div>
@@ -111,12 +115,15 @@ export function DataTab() {
     setBusy("reset-memory");
     try {
       const token = await requestToken("memory.reset");
-      const result = await invoke("memory.reset", { confirmToken: token, keepChat });
+      const result = await invoke("memory.reset", { confirmToken: token, keepChat: !clearChat });
       pushToast(
         "success",
         "记忆已重置",
-        `清掉记忆 ${result.memories} 条、话题 ${result.openLoops} 条、对话 ${result.messages} 条`,
+        `${clearChat ? "对话已清空" : "对话保留"}：清掉记忆 ${result.memories} 条、话题 ${result.openLoops} 条、对话 ${result.messages} 条`,
       );
+      // 库里删了不代表画面上删了：界面上的旧消息要一起清掉再重新拉历史
+      await reloadChatView();
+      await refreshSnapshot();
       stats.reload();
     } catch (error) {
       reportError(error);
@@ -155,6 +162,8 @@ export function DataTab() {
       const result = await invoke("system.resetData", { confirmToken: token, ...keepOptions });
       const rows = Object.values(result.tables).reduce((sum, value) => sum + value, 0);
       pushToast("success", "已整体重置", `清掉 ${rows} 行数据、${result.removedDirs.length} 个目录`);
+      await reloadChatView();
+      await refreshSnapshot();
       stats.reload();
       applyProactiveSummary(null);
     } catch (error) {
@@ -264,7 +273,7 @@ export function DataTab() {
             {stats.data ? `当前有 ${stats.data.total} 条记忆（其中 ${stats.data.pinned} 条是被钉住的红线/重要事实）。` : ""}
           </p>
           <label className="check-row">
-            <input type="checkbox" checked={keepChat} onChange={(event) => setKeepChat(event.target.checked)} />
+            <input type="checkbox" checked={clearChat} onChange={(event) => setClearChat(event.target.checked)} />
             <span>同时清空聊天记录（推荐：不勾的话它会从聊天记录里想起来）</span>
           </label>
           <button className="btn btn-danger" onClick={() => void resetMemory()} disabled={busy === "reset-memory"}>

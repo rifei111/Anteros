@@ -377,3 +377,40 @@ New version 0.6.1 has been downloaded to ...\pending\Anteros-Setup-0.6.1-x64.exe
 - 记忆重置是"物理删除 + 删对话"，不做软删除墓碑；重置后重启也不会"复活"。
 - 头像存在数据库里（不是文件），导出数据包会带上；换机器迁移时一并搬走。
 - 主动消息同步微信是单条整发（多条分条会用换行拼在一个气泡里），避免在微信里连发刷屏。
+
+## 20. v0.10.1 增补（重置记忆真的生效）
+
+### 20.1 修了两个真问题
+
+1. **界面语义与内核开关反向**：数据页的复选框状态变量叫 `keepChat`，文案写的是「同时清空聊天记录」，
+   但默认值是 `true` 且原样传给内核的 `keepChat` —— 于是默认操作是**保留聊天记录**。
+   结果就是：记忆表删干净了，上下文里还躺着整段对话，模型照样能回答「我叫什么」，
+   表现成「重置记忆没生效」。现改为 `clearChat`（默认勾选、勾上=清），调用时传 `keepChat: !clearChat`。
+2. **界面不清**：`memory.reset` 只在库里删，渲染层的 `state.messages` 没动，聊天窗口继续显示旧对话。
+   新增 `reloadChatView()`（清本地消息 + stream + 重新拉 `chat.history`），重置记忆与整体重置后都调用，
+   并 `refreshSnapshot()` 把关系/驱动/主动消息数字一起对齐。
+
+另外两处顺手补齐：
+
+- 记忆页「清空全部」现在带「连聊天记录一起清」复选框（默认勾选）：勾着走 `memory.reset`（记忆+对话一起清），
+  不勾才是老的 `memory.deleteAll`（只在 toast 里说清"聊天记录还在，它还能从对话里想起这些事"）。
+- `memory.reset` 现在会把排着队的主动消息置 `cancelled`：那些动作是从旧记忆长出来的，记忆没了就别再开口提。
+
+### 20.2 验证
+
+- 内核冒烟 **79/79**（新增一项反向断言：`keepChat: true` 时对话保留、记忆仍清零；`keepChat: false` 时历史与记忆双清零）。
+- `vitest` 17 文件 103 用例全绿；kernel/client typecheck 0 error；`check-boundaries` 通过；`package-check` 25 项全过。
+- 打包产物（0.10.1）实跑面板自检（`ANTEROS_SMOKE_REPORT`）：数据页出现「同时清空聊天记录（推荐…）」「重置记忆」「整体重置」「卸载」「保留 API Key 与模型设置」。
+- 未验证：真实鼠标点两次确认弹窗（自动化只到按钮），以及"重置后当面问它还记不记得我"的对话级验收需要配好模型。
+### 20.3 顺手把「通道名」从业务代码里清出去
+
+这一版新增的两处代码踩了项目自己的红线（`scripts/check-boundaries.mjs` 报 8 条违规）：
+
+- 主动消息的第二个出口在 `packages/kernel/src/services/proactive.ts` 里直接读 `wechat.relayProactive`、
+  字段叫 `relayToWechat / wechatReady` —— 等于业务层认了通道名。
+  改成注入式 `RelayPort { deliver, enabled, ready }`，字段统一为 `relayToExternal / externalReady`，
+  开关与就绪判断留在通道层（`app.ts` 组装）。
+- `packages/kernel/src/services/reset.ts` 硬编码了 `wechat-runtime` 目录与 `wechat.` 设置前缀。
+  改成构造参数 `ResetServiceOptions { extraRuntimeDirs, extraSettingPrefixes }`，由 `app.ts` 传进来。
+
+验收：`check-boundaries` 归零；冒烟 79/79、`vitest` 103 用例、client typecheck 0 error 均保持通过。

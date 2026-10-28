@@ -503,9 +503,9 @@ export interface ProactiveSummary {
   /** 今天已经主动发了多少条 */
   sentToday: number;
   lastDeliveredTs: number | null;
-  /** 内置通道是否会把主动消息一并推到微信 */
-  relayToWechat: boolean;
-  wechatReady: boolean;
+  /** 外部通道是否会把主动消息一并推过去（通道层判断，业务层只认这个布尔） */
+  relayToExternal: boolean;
+  externalReady: boolean;
 }
 
 export interface AuditEntry {

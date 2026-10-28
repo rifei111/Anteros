@@ -215,10 +215,10 @@ export function ChatPane() {
           </span>
           {state.proactive.paused ? <span className="proactive-warn">已暂停</span> : null}
           <span className="proactive-detail">
-            {state.proactive.relayToWechat
-              ? state.proactive.wechatReady
-                ? "会同步到微信"
-                : "微信通道未就绪，只在本机"
+            {state.proactive.relayToExternal
+              ? state.proactive.externalReady
+                ? "会同步到外部通道"
+                : "外部通道未就绪，只在本机"
               : "只在本机"}
           </span>
           <button className="link-btn" onClick={() => openAdmin("proactive")}>

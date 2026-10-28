@@ -183,6 +183,15 @@ async function loadHistory(): Promise<void> {
   }
 }
 
+/**
+ * 内核里的对话被清掉之后，把界面上的那一段也清掉再重新拉。
+ * 只删库不清界面，画面里还会挂着旧消息，看起来就像"重置没生效"。
+ */
+export async function reloadChatView(): Promise<void> {
+  setState({ messages: [], stream: null, hasMoreHistory: false, unread: 0 });
+  await loadHistory();
+}
+
 async function loadPresets(): Promise<void> {
   setState({ presetsLoading: true });
   try {

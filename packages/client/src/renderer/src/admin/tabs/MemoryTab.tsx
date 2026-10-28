@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useConfirm } from "../../components/Modal";
 import { formatDateTime, formatPercent, formatRelative, truncate } from "../../lib/format";
 import { invoke, revealFile } from "../../lib/kernel";
-import { focusMemory } from "../../lib/app";
+import { focusMemory, reloadChatView, refreshSnapshot } from "../../lib/app";
 import { IMPORTANCE_LABEL, KIND_LABEL, labelOf } from "../../lib/labels";
 import { pushToast } from "../../lib/store";
 import { LoadingLine, Section, reportError, requestToken, useLoad } from "../helpers";
@@ -46,6 +46,8 @@ export function MemoryTab() {
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [busy, setBusy] = useState(false);
+  // 清空时默认连聊天记录一起清：只删记忆条目的话，它从对话上下文里照样想得起来
+  const [clearChatOnDelete, setClearChatOnDelete] = useState(true);
   const requestSeq = useRef(0);
 
   useEffect(() => {
@@ -140,6 +142,11 @@ export function MemoryTab() {
       body: (
         <div>
           <p>会删掉这台电脑上的所有情节记忆、结构事实与未闭合话题；人格设定会保留。</p>
+          <p>
+            {clearChatOnDelete
+              ? "同时清空聊天记录（推荐：只删记忆的话，它会从聊天记录里重新想起这些事）。"
+              : "保留聊天记录——它仍然会从对话上下文里想起这些事。"}
+          </p>
           <p className="danger-text">这个操作不可撤销，删除数量由内核返回。</p>
         </div>
       ),
@@ -149,13 +156,26 @@ export function MemoryTab() {
     if (!agreed) return;
     setBusy(true);
     try {
-      const token = await requestToken("memory.deleteAll");
-      const result = await invoke("memory.deleteAll", { confirmToken: token });
-      setItems([]);
-      setPinned([]);
-      setTotal(0);
-      stats.reload();
-      pushToast("success", "已清空", `内核删除了 ${result.deleted} 条记忆。`);
+      if (clearChatOnDelete) {
+        // 走重置记忆这条：记忆 + 对话一起清，界面上的旧消息也一起清掉
+        const resetToken = await requestToken("memory.reset");
+        const reset = await invoke("memory.reset", { confirmToken: resetToken, keepChat: false });
+        setItems([]);
+        setPinned([]);
+        setTotal(0);
+        await reloadChatView();
+        await refreshSnapshot();
+        stats.reload();
+        pushToast("success", "已清空", `删掉记忆 ${reset.memories} 条、对话 ${reset.messages} 条。`);
+      } else {
+        const token = await requestToken("memory.deleteAll");
+        const result = await invoke("memory.deleteAll", { confirmToken: token });
+        setItems([]);
+        setPinned([]);
+        setTotal(0);
+        stats.reload();
+        pushToast("success", "已清空", `内核删除了 ${result.deleted} 条记忆。聊天记录还在，它还能从对话里想起这些事。`);
+      }
     } catch (error) {
       reportError(error);
     } finally {
@@ -235,9 +255,19 @@ export function MemoryTab() {
             : `共 ${total} 条；点击一行看详情。`
         }
         action={
-          <button className="btn btn-danger-ghost" onClick={() => void deleteAll()} disabled={busy || total === 0}>
-            {busy ? "处理中…" : "清空全部"}
-          </button>
+          <div className="row-tight">
+            <label className="check-row compact">
+              <input
+                type="checkbox"
+                checked={clearChatOnDelete}
+                onChange={(event) => setClearChatOnDelete(event.target.checked)}
+              />
+              <span>连聊天记录一起清</span>
+            </label>
+            <button className="btn btn-danger-ghost" onClick={() => void deleteAll()} disabled={busy || total === 0}>
+              {busy ? "处理中…" : "清空全部"}
+            </button>
+          </div>
         }
       >
         <div className="filter-row">

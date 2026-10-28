@@ -188,10 +188,10 @@ export function ProactiveTab() {
             <li>
               <span>发到哪</span>
               <strong>
-                {summary.relayToWechat
-                  ? summary.wechatReady
-                    ? "同步到微信会话"
-                    : "想同步微信，但通道没就绪"
+                {summary.relayToExternal
+                  ? summary.externalReady
+                    ? "同步到外部通道"
+                    : "想同步外部通道，但通道没就绪"
                   : "只发在应用里"}
               </strong>
             </li>

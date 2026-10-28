@@ -62,12 +62,28 @@ export interface ResetMemoryResult {
   turns: number;
 }
 
+export interface ResetServiceOptions {
+  /** 通道层自己的运行环境目录（相对 dataDir），由组合根注入，业务代码不认具体名字 */
+  extraRuntimeDirs?: string[];
+  /** 通道层自己的设置前缀与展示名，同上 */
+  extraSettingPrefixes?: Array<{ prefix: string; label: string }>;
+}
+
 export class ResetService {
   constructor(
     private readonly db: Db,
     private readonly dataDir: string,
     private readonly log: LogSink,
+    private readonly options: ResetServiceOptions = {},
   ) {}
+
+  /** 要一起清掉的运行环境目录：插件宿主的那份 + 组合根交进来的通道层目录。 */
+  private runtimeDirs(): string[] {
+    return [
+      path.join(this.dataDir, "plugin-runtime"),
+      ...(this.options.extraRuntimeDirs ?? []).map((dir) => path.join(this.dataDir, dir)),
+    ];
+  }
 
   /** 让"它忘掉你"：记忆 + 未闭合话题 + 叙事槽位 +（默认）对话历史。 */
   resetMemory(agentId: number, options: { keepChat?: boolean } = {}): ResetMemoryResult {
@@ -81,9 +97,14 @@ export class ResetService {
       // idempotency 表没有 agent_id（它按 event_id 去重，单机单实例）
       this.db.run("DELETE FROM idempotency");
     }
+    // 排着队的主动消息是"从旧记忆里长出来的"，记忆都没了就别再开口提它
+    const cancelled = this.db.run(
+      "UPDATE action_queue SET state = 'cancelled' WHERE agent_id = ? AND state IN ('queued', 'quarantined')",
+      [agentId],
+    );
     this.removeContents(path.join(this.dataDir, "media"));
     this.log.info(
-      `memory reset: memories=${counts.memories} loops=${counts.openLoops} narrative=${counts.narrative} messages=${counts.messages} turns=${counts.turns} keepChat=${options.keepChat === true}`,
+      `memory reset: memories=${counts.memories} loops=${counts.openLoops} narrative=${counts.narrative} messages=${counts.messages} turns=${counts.turns} actions=${Number(cancelled.changes)} keepChat=${options.keepChat === true}`,
     );
     return counts;
   }
@@ -127,9 +148,7 @@ export class ResetService {
       removedDirs.push(...this.removeDirs([path.join(this.dataDir, "secrets")]));
     }
     if (!options.keepRuntime) {
-      removedDirs.push(
-        ...this.removeDirs([path.join(this.dataDir, "plugin-runtime"), path.join(this.dataDir, "wechat-runtime")]),
-      );
+      removedDirs.push(...this.removeDirs(this.runtimeDirs()));
     }
     this.removeContents(path.join(this.dataDir, "media"));
     this.removeContents(path.join(this.dataDir, "exports"));
@@ -174,8 +193,9 @@ export class ResetService {
     if (key === "plugins.feedUrl") {
       return options.keepPlugins ? keep("插件") : false;
     }
-    if (key.startsWith("wechat.")) {
-      return options.keepRuntime ? keep("运行环境") : false;
+    const extra = (this.options.extraSettingPrefixes ?? []).find((item) => key.startsWith(item.prefix));
+    if (extra) {
+      return options.keepRuntime ? keep(extra.label) : false;
     }
     if (key === "llm.apiKeyEnc") {
       return options.keepApiKey ? keep("密钥与模型") : false;

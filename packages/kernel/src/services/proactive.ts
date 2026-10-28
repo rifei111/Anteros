@@ -14,6 +14,17 @@ import type { SettingsService } from "../settings.js";
 import type { ConsentService } from "./consent.js";
 import type { CostService } from "./cost.js";
 
+/**
+ * 主动消息的第二个出口。
+ * 通道是否可用、要不要同步，都由注入方（组合根）判断；这里只认三个能力，
+ * 不认识任何具体通道的名字。
+ */
+export interface RelayPort {
+  deliver: (text: string) => Promise<{ ok: boolean; error?: string }>;
+  enabled: () => boolean;
+  ready: () => boolean;
+}
+
 export type ProactiveLevel = "off" | "low" | "normal" | "high";
 
 const LEVEL_INTERVAL_MS: Record<ProactiveLevel, number> = {
@@ -30,8 +41,8 @@ export class ProactiveService {
   private timer: NodeJS.Timeout | null = null;
   private pending: { timer: NodeJS.Timeout } | null = null;
   private ticking = false;
-  /** 主动消息的第二个出口（微信）：由 app.ts 注入，没注入就只发在应用里。 */
-  private relay: ((text: string) => Promise<{ ok: boolean; error?: string }>) | null = null;
+  /** 主动消息的第二个出口（外部通道）：由 app.ts 注入，没注入就只发在应用里。 */
+  private relay: RelayPort | null = null;
 
   constructor(
     private readonly deps: KernelDeps,
@@ -41,7 +52,7 @@ export class ProactiveService {
     private readonly settings: SettingsService,
   ) {}
 
-  setRelay(relay: ((text: string) => Promise<{ ok: boolean; error?: string }>) | null): void {
+  setRelay(relay: RelayPort | null): void {
     this.relay = relay;
   }
 
@@ -116,8 +127,8 @@ export class ProactiveService {
       quietToHour: QUIET_TO_HOUR,
       sentToday: sentToday?.count ?? 0,
       lastDeliveredTs: last?.ts ?? null,
-      relayToWechat: false,
-      wechatReady: false,
+      relayToExternal: this.relay?.enabled() === true,
+      externalReady: this.relay?.ready() === true,
     };
   }
 
@@ -316,18 +327,19 @@ export class ProactiveService {
         if (index < plan.parts.length - 1) await sleep(part.delayAfterMs);
       }
       this.cost.record({ kind: "proactive", model: plan.model, inputTokens: plan.usage.inputTokens, outputTokens: plan.usage.outputTokens });
-      // 出口二选一：只发在应用里，或同时同步到用户指定的微信会话（默认关）。
+      // 出口二选一：只发在应用里，或同时同步到用户指定的外部会话（默认关，由注入方决定开不开）。
       const relay = this.relay;
-      if (relay && this.settings.getJson<boolean>("wechat.relayProactive", false) === true) {
+      if (relay && relay.enabled()) {
         const text = plan.parts.map((item) => item.text).join("\n").trim();
         if (text.length > 0) {
-          void relay(text)
+          void relay
+            .deliver(text)
             .then((result) => {
               this.ports.emit("event.proactive", {
                 state: result.ok ? "relayed" : "relay-failed",
                 actionId,
                 turnId,
-                message: result.ok ? null : result.error ?? "同步到微信失败",
+                message: result.ok ? null : result.error ?? "同步到外部通道失败",
               });
             })
             .catch((error: unknown) => {

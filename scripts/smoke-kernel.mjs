@@ -593,6 +593,19 @@ try {
     historyAfterReset.messages.length === 0 && statsAfterReset.total === 0,
     `历史 ${historyAfterReset.messages.length} 条 / 记忆 ${statsAfterReset.total} 条`,
   );
+
+  // 再验一次反方向：keepChat=true 时记忆清掉、对话留着（界面上的复选框就是映射到这个开关）
+  await call("chat.send", { text: "第二句：我养了只猫叫豆豆。", clientTs: Date.now() });
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const keepToken = await call("confirm.token", { action: "memory.reset" });
+  await call("memory.reset", { confirmToken: keepToken.token, keepChat: true });
+  const keptHistory = await call("chat.history", { limit: 50 });
+  const keptStats = await call("memory.stats", {});
+  check(
+    "勾掉「清空聊天记录」时对话保留、记忆仍清零",
+    keptHistory.messages.length > 0 && keptStats.total === 0,
+    `历史 ${keptHistory.messages.length} 条 / 记忆 ${keptStats.total} 条`,
+  );
 } catch (error) {
   check("端到端流程", false, error.message);
 } finally {

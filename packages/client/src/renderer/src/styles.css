@@ -2756,3 +2756,35 @@ ul {
   object-fit: cover;
   padding: 0;
 }
+
+/* ---- 复选框行与紧凑工具条 ---- */
+.check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-2);
+  cursor: pointer;
+  user-select: none;
+}
+
+.check-row input[type="checkbox"] {
+  flex: none;
+  margin-top: 2px;
+  accent-color: var(--green-strong);
+}
+
+.check-row.compact {
+  margin: 0;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.row-tight {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
