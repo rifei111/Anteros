@@ -48,7 +48,12 @@ function toBridgeError(failure: { code: string; message: string; hint?: string; 
   return new BridgeError(failure.code, failure.message, failure.hint, failure.detail);
 }
 
-const bridge: ClientBridge & { quitApp: () => Promise<void>; updates: UpdatesBridge; uninstaller: ExtendedClientBridge["uninstaller"] } = {
+const bridge: ClientBridge & {
+  quitApp: () => Promise<void>;
+  updates: UpdatesBridge;
+  files: ExtendedClientBridge["files"];
+  uninstaller: ExtendedClientBridge["uninstaller"];
+} = {
   async invoke<M extends KernelMethod>(method: M, params: KernelParams<M>): Promise<KernelResult<M>> {
     const result: unknown = await ipcRenderer.invoke(IPC_CHANNEL.invoke, method, params);
     const envelope = result as IpcResult<unknown>;
@@ -88,6 +93,21 @@ const bridge: ClientBridge & { quitApp: () => Promise<void>; updates: UpdatesBri
     return typeof result === "string" && result.length > 0 ? result : null;
   },
 
+  files: {
+    async readText(options: { title: string; filters?: Array<{ name: string; extensions: string[] }> }) {
+      const result: unknown = await ipcRenderer.invoke(IPC_CHANNEL.readTextFile, options);
+      const parsed = result as { path?: unknown; text?: unknown } | null;
+      if (parsed === null || typeof parsed?.path !== "string") return null;
+      return { path: parsed.path, text: typeof parsed.text === "string" ? parsed.text : "" };
+    },
+    async saveText(
+      text: string,
+      options: { title: string; defaultName?: string; filters?: Array<{ name: string; extensions: string[] }> },
+    ) {
+      const result: unknown = await ipcRenderer.invoke(IPC_CHANNEL.saveTextFile, text, options);
+      return typeof result === "string" && result.length > 0 ? result : null;
+    },
+  },
   async revealFile(path: string) {
     await ipcRenderer.invoke(IPC_CHANNEL.revealFile, path);
   },

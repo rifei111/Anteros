@@ -956,7 +956,15 @@ export class WechatChannelService {
   /** agent 的一条分条 → 微信。失败只记日志，不打断对话。 */
   send(text: string): void {
     const value = (text ?? "").trim();
-    if (value.length === 0 || !this.running) return;
+    if (value.length === 0) return;
+    if (!this.running) {
+      // 别静默丢：通道没在跑的时候，外界看到的现象就是"只在本地回、微信没动"，
+      // 所以这里必须留痕，并把原因挂到状态上让界面能显示。
+      this.lastError = "消息没发出去：微信通道没在运行（去通道页看一下是关着还是异常）";
+      this.deps.log.warn(`[wechat] 丢弃一条外发消息（通道未运行）：${value.slice(0, 24)}`);
+      this.publish();
+      return;
+    }
     this.sendInFlight += 1;
     void this.request("send", { text: value, chatUsername: this.chatUsername() }, 60_000)
       .then(() => {
@@ -965,7 +973,9 @@ export class WechatChannelService {
         this.publish();
       })
       .catch((error: unknown) => {
-        this.lastError = `发送失败：${error instanceof Error ? error.message : String(error)}`;
+        const message = error instanceof Error ? error.message : String(error);
+        this.lastError = `发送失败：${message}`;
+        this.deps.log.warn(`[wechat] 发送失败：${message}`);
         this.publish();
       })
       .finally(() => {

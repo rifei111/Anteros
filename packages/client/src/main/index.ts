@@ -13,7 +13,7 @@
  */
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { IPC_CHANNEL, UNINSTALL_METHOD, UPDATE_EVENT_CHANNEL, UPDATE_METHODS, type IpcResult } from "../common/protocol";
@@ -53,6 +53,9 @@ const SMOKE_VIEW: SmokeView =
       : "consent";
 const SMOKE_SETTLE_MS = 2_000;
 const SMOKE_TIMEOUT_MS = 20_000;
+
+/** 渲染层报错收集（自检时写进报告，平时只看控制台）。 */
+const rendererLogs: string[] = [];
 /** 自检时额外点开的页签文本（如「人格」）；留空就等于老行为。 */
 const SMOKE_TAB = (process.env.ANTEROS_SMOKE_TAB ?? "").trim();
 /** 自检时填进「人格」页签的人设原文并点一次「编译成人格内核」，用来验证这条链路真能跑。 */
@@ -188,6 +191,34 @@ function registerIpcHandlers(client: KernelClient): void {
     },
   );
 
+  // 人设文档这类纯文本：路径只能来自系统对话框，渲染层拿不到任意路径
+  ipcMain.handle(IPC_CHANNEL.readTextFile, async (_event, options: unknown) => {
+    const parsed = options as { title?: string; filters?: Array<{ name: string; extensions: string[] }> } | undefined;
+    const result = await dialog.showOpenDialog({
+      title: typeof parsed?.title === "string" ? parsed.title : "打开文本文件",
+      filters: Array.isArray(parsed?.filters) ? parsed.filters : undefined,
+      properties: ["openFile"],
+    });
+    const filePath = result.canceled ? null : result.filePaths[0] ?? null;
+    if (filePath === null) return null;
+    const text = await readFile(filePath, "utf8");
+    return { path: filePath, text };
+  });
+
+  ipcMain.handle(IPC_CHANNEL.saveTextFile, async (_event, text: unknown, options: unknown) => {
+    const parsed = options as
+      | { title?: string; defaultName?: string; filters?: Array<{ name: string; extensions: string[] }> }
+      | undefined;
+    const result = await dialog.showSaveDialog({
+      title: typeof parsed?.title === "string" ? parsed.title : "保存文本文件",
+      defaultPath: typeof parsed?.defaultName === "string" ? parsed.defaultName : undefined,
+      filters: Array.isArray(parsed?.filters) ? parsed.filters : undefined,
+    });
+    const filePath = result.canceled ? null : result.filePath ?? null;
+    if (filePath === null) return null;
+    await writeFile(filePath, typeof text === "string" ? text : "", "utf8");
+    return filePath;
+  });
   ipcMain.handle(IPC_CHANNEL.revealFile, async (_event, filePath: unknown) => {
     if (typeof filePath !== "string" || filePath.length === 0) return;
     shell.showItemInFolder(filePath);
@@ -240,6 +271,21 @@ function createWindow(): BrowserWindow {
 
   window.on("closed", () => {
     if (mainWindow === window) mainWindow = null;
+  });
+
+  // 渲染层的报错别丢在控制台里：自检时落进报告，平时进日志，报障时能直接查。
+  // Electron 45 的签名还是数字 level：0=verbose 1=info 2=warning 3=error
+  window.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    const name = level >= 3 ? "error" : level === 2 ? "warning" : null;
+    if (name === null) return;
+    const line1 = `[renderer] ${name}: ${message} (${sourceId}:${line})`;
+    console.warn(line1);
+    if (SMOKE_REPORT_PATH) rendererLogs.push(line1);
+  });
+  window.webContents.on("render-process-gone", (_event, details) => {
+    const line1 = `[renderer] 进程退出：${details.reason} (exitCode=${details.exitCode})`;
+    console.warn(line1);
+    if (SMOKE_REPORT_PATH) rendererLogs.push(line1);
   });
 
   const devServerUrl = process.env.ELECTRON_RENDERER_URL;
@@ -648,7 +694,8 @@ async function writeSmokeReport(window: BrowserWindow): Promise<void> {
         };
       })()`,
     );
-    writeFileSync(SMOKE_REPORT_PATH, JSON.stringify(report, null, 2), "utf8");
+    const merged = { ...(report as Record<string, unknown>), rendererLogs: rendererLogs.slice(-40) };
+    writeFileSync(SMOKE_REPORT_PATH, JSON.stringify(merged, null, 2), "utf8");
     console.warn(`[anteros] 自检报告已写：${SMOKE_REPORT_PATH}`);
   } catch (error) {
     console.error("[anteros] 自检报告失败:", error);
@@ -671,7 +718,12 @@ function quitGracefully(exitCode: number): void {
     });
 }
 
-const gotLock = app.requestSingleInstanceLock();
+/**
+ * 单实例锁：正常使用时不允许多开（同一个数据目录抢 SQLite 会出事）。
+ * 自检/排障时可用 ANTEROS_ALLOW_MULTI_INSTANCE=1 关掉锁，配合独立的 ANTEROS_DATA_DIR 跑第二份。
+ */
+const allowMultiInstance = process.env.ANTEROS_ALLOW_MULTI_INSTANCE === "1";
+const gotLock = allowMultiInstance ? true : app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {

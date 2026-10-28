@@ -1,7 +1,8 @@
 import { useRef, useState } from "react";
 import type { ChatMessage } from "@anteros/shared";
-import { sendMessage } from "../lib/app";
-import { pushToast, useAppState } from "../lib/store";
+import { loadModelCatalog, sendMessage } from "../lib/app";
+import { invoke } from "../lib/kernel";
+import { applyModelCatalog, pushToast, useAppState } from "../lib/store";
 import { truncate } from "../lib/format";
 import { CloseIcon, SendIcon } from "./Icons";
 
@@ -65,6 +66,20 @@ export function Composer({ quote, onClearQuote }: ComposerProps) {
   const toggleSplitSend = (enabled: boolean): void => {
     setSplitSend(enabled);
     writeSplitSend(enabled);
+  };
+
+  const models = state.modelsCatalog;
+  const chatModelValue = models?.activeChatModelId ?? "";
+  const selectModel = async (value: string): Promise<void> => {
+    try {
+      const result = await invoke("models.setActiveChat", { modelId: value.length > 0 ? value : null });
+      applyModelCatalog(result.catalog);
+      const picked = result.catalog.entries.find((entry) => entry.id === value);
+      pushToast("success", "已切换聊天模型", picked ? `${picked.label}（${picked.model}）` : "回到主模型");
+    } catch (error) {
+      pushToast("error", "切换失败", error instanceof Error ? error.message : String(error));
+      void loadModelCatalog();
+    }
   };
 
   const submit = async (): Promise<void> => {
@@ -146,6 +161,21 @@ export function Composer({ quote, onClearQuote }: ComposerProps) {
           <span>逐条发送</span>
         </label>
         <span className="split-hint">开启后你打的每行会分成几条依次发出</span>
+        {models && models.entries.length > 0 ? (
+          <label className="model-pick" title="这次对话用哪个模型；不选就用设置里的主模型">
+            <span>模型</span>
+            <select value={chatModelValue} disabled={sending} onChange={(event) => void selectModel(event.target.value)}>
+              <option value="">主模型（{models.primary.model}）</option>
+              {models.entries
+                .filter((entry) => entry.enabled)
+                .map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.label}（{entry.model}）
+                  </option>
+                ))}
+            </select>
+          </label>
+        ) : null}
       </div>
     </div>
   );

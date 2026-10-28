@@ -9,7 +9,7 @@ export const APP_ID = "com.anteros.app";
 export const KERNEL_API_VERSION = "1.0";
 
 /** 产品/内核版本（package.json 的 version 由它对齐；健康面板与体检报告用它）。 */
-export const KERNEL_VERSION = "0.10.1";
+export const KERNEL_VERSION = "0.11.0";
 
 /** 声明文案版本：文案一改就要升级版本号，旧勾选自动失效重勾（草案 14.14.5）。 */
 export const CONSENT_DOC_VERSION = "2026-10.1";

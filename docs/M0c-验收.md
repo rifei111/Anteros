@@ -414,3 +414,25 @@ New version 0.6.1 has been downloaded to ...\pending\Anteros-Setup-0.6.1-x64.exe
   改成构造参数 `ResetServiceOptions { extraRuntimeDirs, extraSettingPrefixes }`，由 `app.ts` 传进来。
 
 验收：`check-boundaries` 归零；冒烟 79/79、`vitest` 103 用例、client typecheck 0 error 均保持通过。
+## 21. v0.11.0 增补（多模型 + 人设文档 + 两个 bug）
+
+### 21.1 多模型
+- `packages/shared/src/domain.ts`：`ModelTaskKind`、`ModelEntry`、`ModelCatalog`；
+- `packages/kernel/src/services/models.ts`：模型清单 CRUD（密钥单独加密存在 `secrets/models/<id>/api_key`，接口只回 `hasKey`）、任务路由、当前对话模型、探测连通性；
+- `expression/service.ts` 调 `models.resolve(task)` 取「端点 + 模型名 + 温度」，`LlmPort.generate` 支持 `override`，成本台账按真实模型记账；
+- 客户端：聊天框顶部选择器、`admin/tabs/MultiModelTab.tsx`（清单 + 五类任务路由）。
+- 验收：冒烟「模型清单能增删」「切换当前对话模型后回放里 model 变了」「按任务类别路由生效」「密钥只回 hasKey」。
+
+### 21.2 人设文档
+- `packages/kernel/src/expression/persona-doc.ts`：`renderPersonaDoc()` / `parsePersonaDoc()`，固定骨架、容错解析；
+- RPC `persona.exportDoc` / `persona.importDoc`；客户端人格页「人设文档」区块（预览 / 导出为文件 / 从文件读取 / 导入）；
+- 主进程新增受限文本读写 IPC（路径只能来自系统对话框）；
+- 单测 `packages/kernel/test/persona-doc.test.ts` 5 例（渲染、往返幂等、部分导入、日期写错的警告、空文档报错）。
+
+### 21.3 两处修复
+- 白屏：`components/ErrorBoundary.tsx` + `main.tsx` 包裹；主进程 `app.requestSingleInstanceLock()`；渲染层 `console-message` 落盘。
+- 「只在本地回、微信没发」：`services/wechat.ts` 的 `send()` 不再静默丢弃（warn 日志 + `lastError` 上浮），`app.ts` 的 `memory.reset` 之后调用 `wechat.refresh()` 重新对齐通道状态。
+
+### 21.4 验证
+- `tsc --noEmit` 全工作区 0 error；`vitest` 18 文件 108 用例全绿；内核冒烟 **83/83**；`package-check` 25 通过。
+- 打包产物实测（`ANTEROS_SMOKE_REPORT` 读面板文本）：人格页出现「人设文档 / 生成当前文档 / 导出为文件 / 从文件读取 / 导入这份文档 / 参数表不会被导入」。

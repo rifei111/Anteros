@@ -28,6 +28,7 @@ import { probeProvider } from "./llm/probe.js";
 import { MemoryService } from "./memory/service.js";
 import { MindService } from "./mind/service.js";
 import { ExpressionService } from "./expression/service.js";
+import { parsePersonaDoc, renderPersonaDoc } from "./expression/persona-doc.js";
 import { PluginService } from "./services/plugins.js";
 import { ChannelService } from "./services/channels.js";
 import { WechatChannelService } from "./services/wechat.js";
@@ -35,6 +36,7 @@ import { ExportService } from "./services/export.js";
 import { ResetService } from "./services/reset.js";
 import { SystemService } from "./services/system.js";
 import { ChatService } from "./services/chat.js";
+import { ModelService } from "./services/models.js";
 import { ProactiveService } from "./services/proactive.js";
 
 export function pipeNameFor(sessionId: string): string {
@@ -76,6 +78,7 @@ export class App {
   private readonly memory: MemoryPort;
   private readonly mind: MindPort;
   private readonly expression: ExpressionPort;
+  private readonly models: ModelService;
   private readonly plugins: PluginService;
   private readonly pluginHost: PluginHostPort;
   private readonly channels: ChannelService;
@@ -101,7 +104,8 @@ export class App {
 
     this.memory = new MemoryService(this.deps, this.llm);
     this.mind = new MindService(this.deps, this.memory, this.llm);
-    this.expression = new ExpressionService(this.deps, this.mind, this.memory, this.llm);
+    this.models = new ModelService(runtime.settings, masterKey, runtime.logger.child("models"));
+    this.expression = new ExpressionService(this.deps, this.mind, this.memory, this.llm, this.models);
 
     const pluginsDir = resolvePluginsDir();
     this.plugins = new PluginService(this.deps, runtime.permissions, runtime.audit, runtime.consent, {
@@ -290,6 +294,10 @@ export class App {
         const keepChat = p.keepChat === true;
         const result = this.reset.resetMemory(this.deps.agentId, { keepChat });
         this.runtime.audit.log("memory.reset", { actorRole: "owner", after: { ...result, keepChat } });
+        // 重置之后通道状态可能是旧的（设置改动/进程退出），重新对齐一次，别让"发不出去"变成静默
+        void this.wechat.refresh().catch((error: unknown) => {
+          this.deps.log.warn(`[app] 重置后刷新通道状态失败：${error instanceof Error ? error.message : String(error)}`);
+        });
         return result;
       }
       case "memory.export": {
@@ -334,6 +342,32 @@ export class App {
         const persona = this.mind.updatePersona((p.patch ?? {}) as Partial<Persona>);
         this.runtime.audit.log("persona.update", { actorRole: "owner", before: null, after: { name: persona.name } });
         return persona;
+      }
+      case "persona.exportDoc": {
+        this.runtime.permissions.assertOwner("查看人设文档");
+        const doc = renderPersonaDoc(this.mind.getPersona());
+        return { text: doc.text, filename: doc.filename };
+      }
+      case "persona.importDoc": {
+        this.runtime.permissions.assertOwner("导入人设文档");
+        this.runtime.consent.requireConsent();
+        const docText = typeof p.text === "string" ? p.text : "";
+        if (docText.trim().length === 0) {
+          throw new AnterosError(ERROR_CODES.EINVALID, "文档是空的：先把人设文档粘进来");
+        }
+        if (docText.length > 200_000) {
+          throw new AnterosError(ERROR_CODES.EINVALID, "文档太大了（超过 200KB），这不像是一份人设");
+        }
+        const parsed = parsePersonaDoc(docText);
+        if (Object.keys(parsed.patch).length === 0) {
+          throw new AnterosError(ERROR_CODES.EINVALID, parsed.warnings[0] ?? "没读出任何能用的字段");
+        }
+        const imported = this.mind.updatePersona(parsed.patch);
+        this.runtime.audit.log("persona.import_doc", {
+          actorRole: "owner",
+          after: { applied: parsed.applied, warnings: parsed.warnings.length, name: imported.name },
+        });
+        return { persona: imported, applied: parsed.applied, warnings: parsed.warnings };
       }
       case "persona.presets":
         return { presets: this.mind.listPresets() };
@@ -611,7 +645,51 @@ export class App {
         this.runtime.audit.log("llm.configure", { actorRole: "owner", after: { model: p.model ?? null, baseUrl: p.baseUrl ?? null } });
         return { status: this.llmStatus() };
       }
-      case "audit.list":
+      /* ---------------- 多模型 ---------------- */
+      case "models.list":
+        return this.models.list();
+      case "models.upsert": {
+        this.runtime.permissions.assertOwner("配置模型清单");
+        const entry = this.models.upsert({
+          id: typeof p.id === "string" && p.id.length > 0 ? p.id : null,
+          label: String(p.label ?? ""),
+          baseUrl: String(p.baseUrl ?? ""),
+          model: String(p.model ?? ""),
+          provider: typeof p.provider === "string" ? p.provider : undefined,
+          apiKey: typeof p.apiKey === "string" ? p.apiKey : undefined,
+          kinds: Array.isArray(p.kinds) ? (p.kinds as never[]) : undefined,
+          enabled: typeof p.enabled === "boolean" ? p.enabled : undefined,
+        });
+        this.runtime.audit.log("models.upsert", { actorRole: "owner", after: { id: entry.id, model: entry.model } });
+        return { entry, catalog: this.models.list() };
+      }
+      case "models.remove": {
+        this.runtime.permissions.assertOwner("删除模型");
+        const id = String(p.id ?? "");
+        const result = this.models.remove(id);
+        this.runtime.audit.log("models.remove", { actorRole: "owner", before: { id } });
+        return { ...result, catalog: this.models.list() };
+      }
+      case "models.setRoute": {
+        this.runtime.permissions.assertOwner("设置任务模型");
+        const catalog = this.models.setRoute(
+          String(p.kind ?? "") as never,
+          typeof p.modelId === "string" && p.modelId.length > 0 ? p.modelId : null,
+        );
+        this.runtime.audit.log("models.set_route", { actorRole: "owner", after: { kind: p.kind ?? null, modelId: p.modelId ?? null } });
+        return { catalog };
+      }
+      case "models.setActiveChat": {
+        this.runtime.permissions.assertOwner("切换聊天模型");
+        const catalog = this.models.setActiveChat(
+          typeof p.modelId === "string" && p.modelId.length > 0 ? p.modelId : null,
+        );
+        return { catalog };
+      }
+      case "models.probe": {
+        this.runtime.permissions.assertOwner("探测模型");
+        return this.models.probe(String(p.id ?? ""));
+      }      case "audit.list":
         return this.runtime.audit.list(Math.min(Number(p.limit ?? 100), 500), typeof p.beforeId === "number" ? p.beforeId : undefined);
       case "narrative.get":
         return { slots: this.mind.getNarrative() };

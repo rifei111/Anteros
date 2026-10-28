@@ -148,6 +148,8 @@ export interface LlmPort {
     maxTokens?: number;
     json?: boolean;
     purpose?: "reply" | "proactive" | "extract" | "world" | "narrative" | "persona";
+    /** 多模型：本次指定用的模型（地址/模型名/密钥）；不传就走主模型 */
+    override?: { baseUrl: string; model: string; apiKey: string };
   }): Promise<LlmResult>;
   isConfigured(): boolean;
   status(): { configured: boolean; providerId: string | null; baseUrl: string | null; model: string | null; lastError: string | null };

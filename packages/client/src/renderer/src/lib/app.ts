@@ -7,7 +7,16 @@
 import type { ChatMessage, KernelEvents, MemoryItem } from "@anteros/shared";
 import { humanizeError } from "./errors";
 import { invoke, newEventId, pollConnection, subscribe, appInfo, quitApp } from "./kernel";
-import { appendLog, applyPluginRuntime, applyUpdateStatus, getState, pushToast, setState, type AdminTab } from "./store";
+import {
+  appendLog,
+  applyModelCatalog,
+  applyPluginRuntime,
+  applyUpdateStatus,
+  getState,
+  pushToast,
+  setState,
+  type AdminTab,
+} from "./store";
 import { truncate } from "./format";
 
 const ONBOARDED_KEY = "anteros.onboarded.v1";
@@ -155,6 +164,17 @@ async function loadSnapshot(): Promise<void> {
     agentAvatar: snapshot.agentAvatar ?? null,
     proactive: snapshot.proactive ?? null,
   });
+  void loadModelCatalog();
+}
+
+/** 拉一次多模型清单（模型页改完、聊天框切模型后都调它）。 */
+export async function loadModelCatalog(): Promise<void> {
+  try {
+    const catalog = await invoke("models.list", {});
+    applyModelCatalog(catalog);
+  } catch {
+    // 清单拉不到不影响聊天：只是选择器空着
+  }
 }
 
 /** 重新拉一次快照：改完频率、重置完数据之后用它把界面上的数字对齐。 */

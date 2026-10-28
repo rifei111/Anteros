@@ -646,3 +646,47 @@ export interface AppSnapshot {
   /** 聊天对象头像（data URL）；空=用名字首字 */
   agentAvatar: string | null;
 }
+
+// ───────────────────────────── 多模型（模型清单 + 任务类别路由） ─────────────────────────────
+
+/** 任务类别：文本类按用途分，另有音频/生图/看图。 */
+export type ModelTaskKind =
+  | "reply"
+  | "proactive"
+  | "extract"
+  | "world"
+  | "narrative"
+  | "persona"
+  | "audio"
+  | "image"
+  | "vision";
+
+/** 一个模型条目：地址 + 模型名 + 加密保存的 key。 */
+export interface ModelEntry {
+  id: string;
+  label: string;
+  /** 供应商标签，只用于显示与预设；实际请求一律走 OpenAI 兼容协议 */
+  provider: string;
+  baseUrl: string;
+  model: string;
+  /** key 是否已在本机加密保存（明文永不出内核） */
+  apiKeyConfigured: boolean;
+  /** 这个模型能接的任务类别；空数组表示只当手动选择用 */
+  kinds: ModelTaskKind[];
+  enabled: boolean;
+  createdAt: number;
+  /** 上次探测成功的时间；null 表示没测过或失败 */
+  lastOkTs: number | null;
+  lastError: string | null;
+}
+
+/** 多模型清单 + 每类任务用哪个模型。 */
+export interface ModelCatalog {
+  entries: ModelEntry[];
+  /** 任务类别 → 模型 id；没有的类别就是没配置，回落到主模型（llm.* 那套） */
+  routes: Partial<Record<ModelTaskKind, string | null>>;
+  /** 聊天框当前选中的模型 id；null = 用主模型 */
+  activeChatModelId: string | null;
+  /** 主模型（llm.* 那套）展示用 */
+  primary: { label: string; baseUrl: string; model: string; configured: boolean };
+}

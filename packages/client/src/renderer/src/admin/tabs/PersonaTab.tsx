@@ -1,5 +1,6 @@
 import type { Persona, PersonaBlueprint, PersonaCompileResult, PersonaTraits } from "@anteros/shared";
 import { useEffect, useState } from "react";
+import { refreshSnapshot } from "../../lib/app";
 import { invoke } from "../../lib/kernel";
 import { applyAgentAvatar, pushToast, setState, useAppState } from "../../lib/store";
 import { LoadingLine, Section, reportError, useLoad } from "../helpers";
@@ -186,6 +187,13 @@ export function PersonaTab() {
 
   const [form, setForm] = useState<CurrentForm | null>(null);
   const [saving, setSaving] = useState(false);
+  // 人设文档：可以导出一份 Markdown 存档，也可以把改过的文档导入回来
+  const [docText, setDocText] = useState("");
+  const [docFilename, setDocFilename] = useState("人设.md");
+  const [docBusy, setDocBusy] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importApplied, setImportApplied] = useState<string[]>([]);
+  const [importWarnings, setImportWarnings] = useState<string[]>([]);
 
   useEffect(() => {
     if (persona) setForm(currentFromPersona(persona));
@@ -337,6 +345,84 @@ export function PersonaTab() {
     }
   };
 
+  /** 生成当前人格的文档（只读预览，同时给导出用）。 */
+  const loadDoc = async (): Promise<void> => {
+    setDocBusy(true);
+    try {
+      const result = await invoke("persona.exportDoc", {});
+      setDocText(result.text);
+      setDocFilename(result.filename);
+      pushToast("success", "文档已生成", "下面就是这份人设，可以直接导出成 .md 文件");
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setDocBusy(false);
+    }
+  };
+
+  const exportDoc = async (): Promise<void> => {
+    const files = window.anteros?.files;
+    if (!files) {
+      pushToast("warn", "这个版本不支持导出", "更新到较新版本，或直接把下面文字复制走");
+      return;
+    }
+    setDocBusy(true);
+    try {
+      const text = docText.length > 0 ? docText : (await invoke("persona.exportDoc", {})).text;
+      const saved = await files.saveText(text, {
+        title: "导出人设文档",
+        defaultName: docFilename,
+        filters: [{ name: "Markdown", extensions: ["md"] }, { name: "文本", extensions: ["txt"] }],
+      });
+      if (saved !== null) pushToast("success", "已导出", saved);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setDocBusy(false);
+    }
+  };
+
+  const openDoc = async (): Promise<void> => {
+    const files = window.anteros?.files;
+    if (!files) {
+      pushToast("warn", "这个版本不支持从文件读取", "把文档内容直接粘到下面的框里也行");
+      return;
+    }
+    try {
+      const picked = await files.readText({
+        title: "选择人设文档",
+        filters: [{ name: "Markdown", extensions: ["md"] }, { name: "文本", extensions: ["txt"] }],
+      });
+      if (picked === null) return;
+      setImportText(picked.text);
+      setImportApplied([]);
+      setImportWarnings([]);
+      pushToast("success", "已读入文件", picked.path);
+    } catch (error) {
+      reportError(error);
+    }
+  };
+
+  const importDoc = async (): Promise<void> => {
+    if (!editable || docBusy) return;
+    const text = importText.trim();
+    if (text.length === 0) {
+      pushToast("warn", "还没有内容", "先选一个 .md 文件，或者把文档粘进框里");
+      return;
+    }
+    setDocBusy(true);
+    try {
+      const result = await invoke("persona.importDoc", { text });
+      setImportApplied(result.applied);
+      setImportWarnings(result.warnings);
+      await refreshSnapshot();
+      pushToast("success", "人设已导入", `改了 ${result.applied.length} 项：${result.applied.join("、")}`);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setDocBusy(false);
+    }
+  };
   return (
     <div className="panel-stack">
       <Section
@@ -374,6 +460,54 @@ export function PersonaTab() {
         </div>
       </Section>
 
+      <Section
+        title="人设文档"
+        hint="把整个人设看成一份文档：能导出存档、也能改完再导入。文档只写人设，不写记忆。"
+        action={
+          <div className="row-actions">
+            <button className="btn" disabled={!editable || docBusy} onClick={() => void loadDoc()}>
+              {docBusy ? "处理中…" : "生成当前文档"}
+            </button>
+            <button className="btn" disabled={docBusy} onClick={() => void exportDoc()}>
+              导出为文件
+            </button>
+            <button className="btn" disabled={docBusy} onClick={() => void openDoc()}>
+              从文件读取
+            </button>
+          </div>
+        }
+      >
+        <div className="doc-panel">
+          <textarea
+            className="doc-textarea"
+            readOnly
+            spellCheck={false}
+            placeholder="点「生成当前文档」看看她现在被写成了什么样"
+            value={docText}
+          />
+          <textarea
+            className="doc-textarea"
+            spellCheck={false}
+            placeholder="导入区：把改好的人设文档粘进来，或者点「从文件读取」选一个 .md"
+            value={importText}
+            onChange={(event) => setImportText(event.target.value)}
+          />
+          <div className="row-actions">
+            <button className="btn btn-primary" disabled={!editable || docBusy} onClick={() => void importDoc()}>
+              导入这份文档
+            </button>
+            <span className="muted">
+              导入是「改」不是「覆盖」：文档里没写到的字段保持原样；参数表不会被导入。
+            </span>
+          </div>
+          {importApplied.length > 0 ? (
+            <p className="prose muted">已应用：{importApplied.join("、")}</p>
+          ) : null}
+          {importWarnings.length > 0 ? (
+            <p className="prose warn-text">有 {importWarnings.length} 处没读懂：{importWarnings.join("；")}</p>
+          ) : null}
+        </div>
+      </Section>
       <Section
         title="用一段话描述她"
         hint={ownerHint ?? "写得越具体，编译出来越像；编译只是一份草案，改到满意再应用。"}

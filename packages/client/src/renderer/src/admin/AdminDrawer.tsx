@@ -8,6 +8,7 @@ import { DataTab } from "./tabs/DataTab";
 import { ExpressionTab } from "./tabs/ExpressionTab";
 import { MemoryTab } from "./tabs/MemoryTab";
 import { ModelTab } from "./tabs/ModelTab";
+import { MultiModelTab } from "./tabs/MultiModelTab";
 import { OwnerTab } from "./tabs/OwnerTab";
 import { PersonaTab } from "./tabs/PersonaTab";
 import { PluginsTab } from "./tabs/PluginsTab";
@@ -24,6 +25,7 @@ const TABS: ReadonlyArray<{ id: AdminTab; label: string }> = [
   { id: "proactive", label: "主动消息" },
   { id: "cost", label: "成本" },
   { id: "model", label: "模型" },
+  { id: "models", label: "多模型" },
   { id: "advanced", label: "高级" },
   { id: "update", label: "更新" },
   { id: "data", label: "数据" },
@@ -49,6 +51,8 @@ function renderTab(tab: AdminTab) {
       return <CostTab />;
     case "model":
       return <ModelTab />;
+    case "models":
+      return <MultiModelTab />;
     case "advanced":
       return <AdvancedTab />;
     case "update":

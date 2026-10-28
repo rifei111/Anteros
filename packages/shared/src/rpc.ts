@@ -25,6 +25,9 @@ import type {
   Importance,
   LlmProbeResult,
   LlmStatus,
+  ModelCatalog,
+  ModelEntry,
+  ModelTaskKind,
   MemoryItem,
   MemoryKind,
   MemorySearchResult,
@@ -142,6 +145,10 @@ export interface KernelApi {
   "persona.compile": MethodSpec<{ text: string }, PersonaCompileResult>;
   /** 把编译结果（用户可微调过）落库；等价于一次 owner 显式编辑人格。 */
   "persona.applyBlueprint": MethodSpec<{ blueprint: PersonaBlueprint }, Persona>;
+  /** 把当前人格渲染成一份可读、可改、可再导入的 Markdown 文档。 */
+  "persona.exportDoc": MethodSpec<Record<string, never>, { text: string; filename: string }>;
+  /** 从文档导入人设：只改文档里写到的字段，没写到的保持不动。 */
+  "persona.importDoc": MethodSpec<{ text: string }, { persona: Persona; applied: string[]; warnings: string[] }>;
   /** 聊天对象头像：data URL（空=回退到名字首字）。客户端在渲染层选图后转 data URL 传进来。 */
   "ui.avatar.get": MethodSpec<Record<string, never>, { dataUrl: string | null }>;
   "ui.avatar.set": MethodSpec<{ dataUrl: string | null }, { dataUrl: string | null }>;
@@ -216,7 +223,25 @@ export interface KernelApi {
   "turn.replay": MethodSpec<{ turnId: number }, TurnReplay>;
 
   "cost.summary": MethodSpec<Record<string, never>, CostSummary>;
-  "cost.setBudget": MethodSpec<{ monthlyCny: number }, CostSummary>;
+  /* ---------------- 多模型 ---------------- */
+  "models.list": MethodSpec<Record<string, never>, ModelCatalog>;
+  "models.upsert": MethodSpec<
+    {
+      id?: string | null;
+      label: string;
+      baseUrl: string;
+      model: string;
+      provider?: string;
+      apiKey?: string;
+      kinds?: ModelTaskKind[];
+      enabled?: boolean;
+    },
+    { entry: ModelEntry; catalog: ModelCatalog }
+  >;
+  "models.remove": MethodSpec<{ id: string }, { removed: boolean; catalog: ModelCatalog }>;
+  "models.setRoute": MethodSpec<{ kind: ModelTaskKind; modelId: string | null }, { catalog: ModelCatalog }>;
+  "models.setActiveChat": MethodSpec<{ modelId: string | null }, { catalog: ModelCatalog }>;
+  "models.probe": MethodSpec<{ id: string }, { ok: boolean; message: string; latencyMs: number }>;  "cost.setBudget": MethodSpec<{ monthlyCny: number }, CostSummary>;
   "llm.status": MethodSpec<Record<string, never>, LlmStatus>;
   /** 真的发一次请求量延迟：先 GET /models，不通再发一次 1 token 的对话。不写任何配置。 */
   "llm.test": MethodSpec<

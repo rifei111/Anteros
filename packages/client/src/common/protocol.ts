@@ -22,6 +22,8 @@ export const IPC_CHANNEL = {
   appInfo: "anteros:app-info",
   /** 客户端自身能力（不在 ClientBridge 契约内，仅用于「我不接受，退出」） */
   quitApp: "anteros:quit-app",
+  readTextFile: "anteros:read-text-file",
+  saveTextFile: "anteros:save-text-file",
 } as const;
 
 /** 应用内更新：主进程 ↔ 渲染进程的独立通道（不走内核，更新与内核无关）。 */
@@ -93,6 +95,17 @@ export interface ExtendedClientBridge extends ClientBridge {
     download(): Promise<UpdateStatusView | null>;
     install(): Promise<UpdateStatusView | null>;
     onEvent(handler: (status: UpdateStatusView) => void): () => void;
+  };
+  /** 文本文件读写：人设文档的导出/导入用它（路径一律来自系统对话框，前端拿不到任意路径） */
+  files: {
+    readText(options: { title: string; filters?: Array<{ name: string; extensions: string[] }> }): Promise<{
+      path: string;
+      text: string;
+    } | null>;
+    saveText(
+      text: string,
+      options: { title: string; defaultName?: string; filters?: Array<{ name: string; extensions: string[] }> },
+    ): Promise<string | null>;
   };
   /** 卸载（数据栏最底下；keepData=false 会先删数据目录） */
   uninstaller: {

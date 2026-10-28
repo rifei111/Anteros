@@ -2788,3 +2788,76 @@ ul {
   gap: 10px;
   flex-wrap: wrap;
 }
+/* 渲染失败兜底：宁可给一段错误，也不要白屏 */
+.crash-screen {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg, #14161a);
+  padding: 32px;
+  z-index: 9999;
+}
+
+.crash-card {
+  max-width: 720px;
+  width: 100%;
+  background: var(--panel, #1c1f26);
+  border: 1px solid var(--border, #2c313b);
+  border-radius: 14px;
+  padding: 26px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.crash-card h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.crash-detail {
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.crash-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
+/* 人设文档：两块等宽文本域，预览在上、导入在下 */
+.doc-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.doc-textarea {
+  width: 100%;
+  min-height: 180px;
+  max-height: 320px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--fg);
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.warn-text {
+  color: var(--warn, #b45309);
+}

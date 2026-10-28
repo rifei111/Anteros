@@ -390,6 +390,29 @@ try {
   check("重读人格=刚应用的内核", reread.name === "林野" && reread.immutable.background.length > 0);
   const updated = await call("persona.update", { patch: { traits: { burstMin: 9, burstMax: 9 } } });
   check("越界的数值被钳住而不是照单全收", updated.traits.burstMin <= 3 && updated.traits.burstMax <= 3, `burst=${updated.traits.burstMin}-${updated.traits.burstMax}`);
+  /* 13b. 人设文档：能看、能存、能改完再导入 */
+  const doc = await call("persona.exportDoc", {});
+  check(
+    "人设文档能导出一份可读的 Markdown",
+    typeof doc?.text === "string" && doc.text.includes("# 人设：") && doc.filename.endsWith(".md"),
+    doc?.filename ?? "",
+  );
+  check("文档里带参数表但只作只读查看", doc.text.includes("内核参数") && doc.text.includes("| 记忆衰减 d |"));
+  const importedDoc = await call("persona.importDoc", {
+    text: doc.text.replace(/## 兴趣[\s\S]*?## 背景/, "## 兴趣\n\n- 逛旧书店\n- 拍路牌\n\n## 背景"),
+  });
+  check(
+    "改过的文档能导入回去（只改文档里写到的字段）",
+    Array.isArray(importedDoc?.applied) && importedDoc.applied.length > 0 && importedDoc.persona?.interests.includes("逛旧书店"),
+    `${importedDoc?.applied?.[0] ?? ""}`,
+  );
+  let badDocError = "";
+  try {
+    await call("persona.importDoc", { text: "一段完全没有结构的话" });
+  } catch (error) {
+    badDocError = String(error && error.message ? error.message : error);
+  }
+  check("读不懂的文档会明确报错并给出该怎么写", badDocError.includes("名字"), badDocError.slice(0, 60));
 
   /* 14. 插件授权与启用：界面用 plugins.* 叫法换 token、宿主按 plugin.* 消费，必须能对上 */
   const plugins = await call("plugins.list");

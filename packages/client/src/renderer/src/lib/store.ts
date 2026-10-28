@@ -8,6 +8,7 @@
 
 import { useSyncExternalStore } from "react";
 import type {
+  ModelCatalog,
   ChatMessage,
   ConsentStatus,
   CostSummary,
@@ -40,6 +41,7 @@ export type AdminTab =
   | "proactive"
   | "cost"
   | "model"
+  | "models"
   | "advanced"
   | "update"
   | "data";
@@ -92,6 +94,8 @@ export interface AppState {
   drives: DriveState | null;
   owner: OwnerStatus | null;
   llm: LlmStatus | null;
+  /** 多模型清单（模型 + 任务类别路由 + 聊天框选择） */
+  modelsCatalog: ModelCatalog | null;
   health: SystemHealth | null;
   cost: CostSummary | null;
   plugins: PluginInfo[];
@@ -138,6 +142,7 @@ const initialState: AppState = {
   drives: null,
   owner: null,
   llm: null,
+  modelsCatalog: null,
   health: null,
   cost: null,
   plugins: [],
@@ -268,4 +273,13 @@ export function appendLog(line: LogLine): void {
 
 export function clearLogs(): void {
   setState({ logs: [] });
+}
+
+/* ------------------------------------------------------------------ */
+/* 多模型                                                              */
+/* ------------------------------------------------------------------ */
+
+/** 内核推来的模型清单：整块替换（清单很小，不值得做 diff）。 */
+export function applyModelCatalog(catalog: ModelCatalog | null): void {
+  setState({ modelsCatalog: catalog });
 }

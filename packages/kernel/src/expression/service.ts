@@ -34,6 +34,8 @@ export class ExpressionService implements ExpressionPort {
     private readonly mind: MindPort,
     private readonly memory: MemoryPort,
     private readonly llm: LlmPort,
+    /** 多模型：按任务类别解析该用哪个模型；不传就全走主模型 */
+    private readonly models: { resolve(kind: "reply" | "proactive" | "extract" | "world" | "narrative" | "persona" | "audio" | "image" | "vision"): { baseUrl: string; model: string; apiKey: string; source: string } | null } | null = null,
   ) {
     this.assembler = new PromptAssembler(deps, mind, memory);
     this.anti = new AntiTemplateGuard(deps.db, deps.agentId);
@@ -60,11 +62,29 @@ export class ExpressionService implements ExpressionPort {
     const bundle = await this.assemble({ agentId: input.agentId, userText: input.userText, trigger: input.trigger, now: input.now });
     const settings = new SettingsService(this.deps.db);
     const persona = this.mind.getPersona();
+    // 多模型：先按任务类别解析；解析不到再看主模型配置
+    const kind = input.trigger === "reply" ? "reply" : "proactive";
+    const resolved = this.models?.resolve(kind) ?? null;
     const presence = bundle.world.presence;
     const seed = `${this.deps.agentId}:${input.now}:${input.trigger}:${settings.get("llm.model")}`;
     const rng = Rng.fromString(seed);
     const planInput: PlanPartsInput = { traits: persona.traits, presence, rng };
 
+    if (!resolved && !this.llm.isConfigured()) {
+      return this.degraded(bundle, planInput, DEGRADED_UNCONFIGURED, "unconfigured", {
+        memoryIds: bundle.evidence.map((item) => item.id),
+        pinnedIds: bundle.pinned.map((item) => item.id),
+        slots: bundle.slots,
+        relation: { stage: bundle.relation.stage, mode: bundle.relation.mode },
+        presence,
+        prompt: bundle.system,
+        seed,
+        model: settings.get("llm.model"),
+        modelSource: "primary",
+        trigger: input.trigger,
+        reason: input.reason ?? null,
+      });
+    }
     const ctxSnapshot = {
       memoryIds: bundle.evidence.map((item) => item.id),
       pinnedIds: bundle.pinned.map((item) => item.id),
@@ -73,13 +93,13 @@ export class ExpressionService implements ExpressionPort {
       presence,
       prompt: bundle.system,
       seed,
+      model: resolved?.model ?? settings.get("llm.model"),
+      modelSource: resolved?.source ?? "primary",
       trigger: input.trigger,
       reason: input.reason ?? null,
     };
 
-    if (!this.llm.isConfigured()) {
-      return this.degraded(bundle, planInput, DEGRADED_UNCONFIGURED, "unconfigured", ctxSnapshot);
-    }
+
 
     let system = bundle.system;
     if (input.trigger === "proactive" || input.trigger === "impulse") {
@@ -106,6 +126,9 @@ export class ExpressionService implements ExpressionPort {
           temperature: settings.get("llm.temperature"),
           maxTokens: settings.get("llm.maxTokens"),
           purpose: input.trigger === "reply" ? "reply" : "proactive",
+          ...(resolved
+            ? { override: { baseUrl: resolved.baseUrl, model: resolved.model, apiKey: resolved.apiKey } }
+            : {}),
         });
         text = result.text;
         model = result.model;

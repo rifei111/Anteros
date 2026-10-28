@@ -66,16 +66,19 @@ export class LlmClient implements LlmPort {
     maxTokens?: number;
     json?: boolean;
     purpose?: "reply" | "proactive" | "extract" | "world" | "narrative" | "persona";
+    /** 多模型：本次指定用的模型（地址/模型名/密钥）；不传就走主模型 */
+    override?: { baseUrl: string; model: string; apiKey: string };
   }): Promise<LlmResult> {
-    const key = this.apiKey();
+    // 多模型：这一次用哪个模型由调用方决定（路由/聊天框选择都解析在 ModelService 里）
+    const key = input.override?.apiKey ?? this.apiKey();
     if (!key) {
       this.lastError = "尚未配置 API Key";
       throw new AnterosError(ERROR_CODES.EBLOCKED, "还没配置模型 API Key", {
         hint: "打开设置 → 模型，填入 OpenAI 兼容接口的 Base URL、模型名与 API Key",
       });
     }
-    const base = this.settings.get("llm.baseUrl").replace(/\/+$/, "");
-    const model = this.settings.get("llm.model");
+    const base = (input.override?.baseUrl ?? this.settings.get("llm.baseUrl")).replace(/\/+$/, "");
+    const model = input.override?.model ?? this.settings.get("llm.model");
     const url = base.endsWith("/chat/completions") ? base : `${base}/chat/completions`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 90_000);
