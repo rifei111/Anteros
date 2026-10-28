@@ -327,3 +327,29 @@ New version 0.6.1 has been downloaded to ...\pending\Anteros-Setup-0.6.1-x64.exe
 - `vitest` 17 文件 101 用例全绿；内核冒烟 71/71；`package-check` 25 通过 0 警告 0 错误。
 - 安装包 `Anteros-Setup-0.8.2-x64.exe`（123,184,355 B）内含修好的 sidecar 与 kernel（已核对关键字）。
 - 仍未验证：群聊、图片/语音等非文本消息的处理（当前只回文本）、长时间运行的稳定性。
+
+## 18. v0.9.0 增补（完全体模式按用户要求放开两条红线）
+
+### 18.1 放开了什么
+
+`packages/kernel/src/expression/prompt.ts` 原来只有一套 `EXPRESSION_CONSTRAINTS`，其中三条是标准模式的认账规则。
+现在拆成 `COMMON_CONSTRAINTS`（写法）+ `STANDARD_CONSTRAINTS`（认账、不编肉身经历、追问降级）
++ `IMMERSION_CONSTRAINTS`（完全体），由 `expressionConstraints(mode)` 按当前关系模式选用：
+
+- 不再要求"被追问时承认自己是 AI"，改为"可以打岔、反问、含糊过去，不要认领机器的身份"；
+- 允许"关于你自己可以现编"（在做什么、路上看到什么、吃了什么），要求与自己前后说过的话一致；
+- 生活模拟关闭时那段"不要编造具体场景"在完全体下改为"按人设过自己的日子"；
+- 【禁区】里"不假装有真人的身体"在完全体下改为"不必自证是机器"，但"不假装能连接你其实没连接的东西"仍在。
+
+### 18.2 没放开的（说清楚，不是遗漏）
+
+- **不替对方编**：用户说过什么、做过什么，只能来自记忆层；忘记就承认忘记（否则用户会以为它真记得，这是关系里最伤的一种错）。
+- **危机优先**：对方表达自伤/伤害他人时立刻放下人设。
+- **不做法律/医疗/金钱承诺；不碰第三方隐私。**
+- 只告知一次：开启完全体的风险页 + 二次确认 + `relation.setMode` 的 `confirm.token` 是唯一一次告知，进去之后不再自我解释。
+
+### 18.3 验证
+
+- 新增 2 组用例（`packages/kernel/test/expression.prompt.test.ts`）：约束集合按模式切换；切到 `full_human` 后整份系统提示词里不再出现"承认自己是 AI"、"不要编造具体场景"，且仍含"关于对方不要替他编""不碰自伤"。
+- `vitest` 17 文件 103 用例全绿；内核冒烟 71/71；`check-boundaries` 通过；客户端 typecheck / build 通过。
+- 界面文案同步：`packages/client/src/renderer/src/admin/tabs/ExpressionTab.tsx` 的风险页与确认弹窗改成"开放这两条 + 只告知一次"的口径。

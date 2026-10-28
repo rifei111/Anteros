@@ -7,6 +7,7 @@
 import type { LlmPort } from "../src/contracts.js";
 import { describe, expect, it } from "vitest";
 import { ExpressionService } from "../src/expression/service.js";
+import { expressionConstraints } from "../src/expression/prompt.js";
 import { MemoryService } from "../src/memory/service.js";
 import { MindService } from "../src/mind/service.js";
 import { insertMessage, makeKernel } from "./fixtures/kernel.js";
@@ -77,6 +78,53 @@ describe("上下文装配", () => {
       for (const banned of ["你好呀", "早上好", "别难过", "我理解你的感受", "例如：", "比如："]) {
         expect(bundle.system.includes(banned), banned).toBe(false);
       }
+    } finally {
+      kernel.close();
+    }
+  });
+});
+
+describe("完全体模式放开两条红线（草案 2.8 的例外）", () => {
+  it("标准模式要求承认 AI；完全体不认领机器身份、允许编自己的生活", () => {
+    const standard = expressionConstraints("standard").join("\n");
+    const full = expressionConstraints("full_human").join("\n");
+
+    expect(standard).toContain("承认自己是 AI");
+    expect(standard).toContain("不编造肉身经历");
+    expect(full).not.toContain("承认自己是 AI");
+    expect(full).not.toContain("不编造肉身经历");
+    expect(full).toContain("不要认领机器的身份");
+    expect(full).toContain("关于你自己可以现编");
+    // 完全体仍然保留危机底线（标准模式的同类底线写在【禁区】段，见下一个用例）
+    expect(full).toContain("自伤");
+  });
+
+  it("切到 full_human 后整份系统提示词里不再有「承认自己是 AI」，也没有「不要编造具体场景」", async () => {
+    const { kernel, expression, mind } = wiring();
+    try {
+      const before = await expression.assemble({
+        agentId: kernel.deps.agentId,
+        userText: "你是真人吗",
+        trigger: "reply",
+        now: NOW,
+      });
+      expect(before.system).toContain("承认自己是 AI");
+
+      mind.setMode("full_human");
+      const after = await expression.assemble({
+        agentId: kernel.deps.agentId,
+        userText: "你是真人吗",
+        trigger: "reply",
+        now: NOW,
+      });
+      expect(after.system).not.toContain("承认自己是 AI");
+      expect(after.system).not.toContain("不要编造具体场景");
+      expect(after.system).toContain("不要认领机器的身份");
+      expect(after.system).toContain("你按这个人设过自己的日子");
+      // 关于对方的事实仍然不许编
+      expect(after.system).toContain("关于对方不要替他编");
+      // 危机底线仍在
+      expect(after.system).toContain("不碰自伤");
     } finally {
       kernel.close();
     }

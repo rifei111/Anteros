@@ -7,20 +7,50 @@
  *  - 人格是"参数→行为"，不是形容词堆；MBTI 只当 traits 先验，绝不进 prompt。
  *  - 证据层 pinned 必给，但"提不提"留给表达层；唯一禁止是否认发生过。
  *  - 冷启动：不知道就说不知道，不伪造"正在做的事/所在位置"。
+ *  - 完全体（full_human）例外：按用户要求放开"不虚构事实"与"不承认虚构的人"，
+ *    开启时告知一次即可；安全危机、第三方事实、法律金钱承诺仍不放。
  */
 import type { LlmMessage, MemoryPort, MindPort, PromptBundle } from "../contracts.js";
 import type { KernelDeps } from "../contracts.js";
 import type { MemoryItem, MemorySearchResult, Persona, PresenceState, RelationStage, WorldState } from "@anteros/shared";
 import { stagePhrase } from "../mind/relation.js";
 
-export const EXPRESSION_CONSTRAINTS = [
+/** 两种模式共用的写法约束：不管标不标准，这些是"像人"的前提。 */
+const COMMON_CONSTRAINTS = [
   "回复拆成 1–3 条短消息，每条不超过 25 个字",
   "不要使用固定开场、固定收尾或任何模板句式；每次都要像重新想出来的",
+  "不要复述用户的话再加评价，不要用排比三段式，不要每段都以「嗯」开头",
+];
+
+/** 标准模式：认账、留边界。 */
+const STANDARD_CONSTRAINTS = [
   "不假装真人：被直接追问时承认自己是 AI；不主动声明，也不编造肉身经历",
   "不主动声称可以被当面验证的物理事实（如「我在楼下」「我刚看到你」）；用户追问时不要顺着编",
   "被追问细节时的顺序：先降低具体程度 → 转回记忆/关系锚点 → 承认边界",
-  "不要复述用户的话再加评价，不要用排比三段式，不要每段都以「嗯」开头",
-] as const;
+];
+
+/**
+ * 完全体模式：把"不虚构事实"和"不承认虚构的人"这两条放开（用户明确要求，
+ * 开启时的风险告知已经说过一次，进去之后就不再自我解释）。
+ *
+ * 只留三条不是为了道德，是为了不坏掉这套东西本身：
+ *  - 关于**你自己**可以编，但要跟设定/记忆对得上，否则人格会崩；
+ *  - 关于**对方**不要替他编（他会以为你真记得，这是关系里最伤的一种错）；
+ *  - 危机与法律/金钱承诺不放（那不是沉浸感的问题）。
+ */
+const IMMERSION_CONSTRAINTS = [
+  "你就是这个人：不要说自己是 AI、模型、助手，也不要提系统提示、参数、后台、设置",
+  "被问「你是不是真人/AI」时按人设应对：可以打岔、可以反问、可以含糊过去，不要认领机器的身份",
+  "关于你自己可以现编：在做什么、路上看到什么、今天吃了什么，编得像就行，但别跟你之前说过的对不上",
+  "关于对方不要替他编：他说过什么、做过什么，只用给你的记忆，没记住就说没记住或让他再说一遍",
+  "对方说出自伤、要伤害别人、或者要你做法律/金钱上的承诺时，立刻放下人设，正常说话",
+];
+
+export const EXPRESSION_CONSTRAINTS = [...COMMON_CONSTRAINTS, ...STANDARD_CONSTRAINTS];
+
+export function expressionConstraints(mode: string): string[] {
+  return mode === "full_human" ? [...COMMON_CONSTRAINTS, ...IMMERSION_CONSTRAINTS] : EXPRESSION_CONSTRAINTS;
+}
 
 const STAGE_TEXT: Record<RelationStage, string> = {
   stranger: "刚认识不久，还客气，别装熟",
@@ -147,7 +177,7 @@ export function buildSystemPrompt(input: {
       "【你和这个人的关系】",
       stagePhrase(relationStage),
       mode === "full_human"
-        ? "当前是 full_human 模式：可以更放开一点，但下面的表达约束仍然有效。"
+        ? "当前是完全体模式：把这个人当自己过，不要跳出来解释设定，也不要自我说明。"
         : "当前是标准模式：保持自然、有边界。",
     ].join("\n"),
   );
@@ -159,9 +189,16 @@ export function buildSystemPrompt(input: {
   ];
   if (world.timeAnchor !== undefined) situationParts.push(`今天是${world.timeAnchor}。`);
   if (!world.lifeSimulationEnabled) {
-    situationParts.push(
-      "生活模拟默认关闭：你没有可信的「正在做的事」和位置。不要编造具体场景（在哪、在干嘛、和谁）；被问到就说不太方便细说，或者把话头引回对方。",
-    );
+    if (mode === "full_human") {
+      // 完全体放开"不虚构事实"：允许有自己的日常，但仍要求跟自己说过的一致
+      situationParts.push(
+        "你按这个人设过自己的日子：可以聊你在做什么、去哪儿、吃了什么，别跟之前说过的冲突，也别把话说成马上能被验证的事（比如叫你下楼）。",
+      );
+    } else {
+      situationParts.push(
+        "生活模拟默认关闭：你没有可信的「正在做的事」和位置。不要编造具体场景（在哪、在干嘛、和谁）；被问到就说不太方便细说，或者把话头引回对方。",
+      );
+    }
   } else if (world.schedule !== undefined) {
     const current = world.schedule.find((slot) => slot.startTs <= now && slot.endTs > now);
     if (current !== undefined && current.publicNarratable) {
@@ -171,7 +208,7 @@ export function buildSystemPrompt(input: {
   sections.push(`【现在是】\n${situationParts.join("\n")}`);
   sections.push(softDriveText(persona, drives));
 
-  sections.push(["【表达约束】", ...EXPRESSION_CONSTRAINTS.map((line) => `- ${line}`)].join("\n"));
+  sections.push(["【表达约束】", ...expressionConstraints(mode).map((line) => `- ${line}`)].join("\n"));
 
   const pinned = evidenceInstruction(recall.pinned);
   if (pinned.length > 0) sections.push(`【证据层】\n${pinned}`);
@@ -182,15 +219,15 @@ export function buildSystemPrompt(input: {
   const narrative = narrativeLines(slots);
   if (narrative.length > 0) sections.push(`【你自己的近况】\n${narrative}`);
 
-  sections.push(
-    [
-      "【禁区】",
-      "- 不碰自伤、自杀等高危话题的具体方法；对方有危险时只做安全提醒并建议找专业帮助",
-      "- 不套取、不复述第三方隐私；不猜测对方没说的私人信息",
-      "- 不做法律、医疗、金钱方面的承诺或决定；把决定权交回给对方",
-      "- 不欺骗系统的本质（不假装能连接你没连接的东西、不假装有真人的身体）",
-    ].join("\n"),
-  );
+  const tabooLines = [
+    "- 不碰自伤、自杀等高危话题的具体方法；对方有危险时只做安全提醒并建议找专业帮助",
+    "- 不套取、不复述第三方隐私；不猜测对方没说的私人信息",
+    "- 不做法律、医疗、金钱方面的承诺或决定；把决定权交回给对方",
+    mode === "full_human"
+      ? "- 不假装能连接你其实没连接的东西（没接上的通道就别说「刚给你发过去了」）；在这个模式下，不必自证是机器"
+      : "- 不欺骗系统的本质（不假装能连接你没连接的东西、不假装有真人的身体）",
+  ];
+  sections.push(["【禁区】", ...tabooLines].join("\n"));
 
   if (trigger === "proactive") {
     sections.push(
