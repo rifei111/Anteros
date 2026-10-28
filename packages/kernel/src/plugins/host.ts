@@ -395,7 +395,10 @@ export class PluginHost implements PluginHostPort {
   list(): PluginInfo[] {
     const rows = this.db.all<PluginRow>("SELECT * FROM plugins ORDER BY id");
     const known = new Set(rows.map((row) => row.id));
-    const infos = rows.map((row) => this.toInfoFromRow(row));
+    // 磁盘上已经没有的插件不再列出来：留着数据库行是给它数据留后路，
+    // 但界面不该再显示一个「已废弃、永远启用不了」的卡片
+    const gone = new Set(this.registry.missing());
+    const infos = rows.filter((row) => !gone.has(row.id)).map((row) => this.toInfoFromRow(row));
     for (const invalid of this.registry.invalid()) {
       if (known.has(invalid.id)) continue;
       infos.push({

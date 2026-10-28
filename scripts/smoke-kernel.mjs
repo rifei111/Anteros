@@ -555,6 +555,44 @@ try {
   check("通道没跑时诊断被拒（EBLOCKED）", doctorBlocked);
   const wechatChat = await call("channels.wechat.setChat", { chatUsername: "filehelper" });
   check("能设置白名单会话", wechatChat.chatUsername === "filehelper");
+
+  /* ---- 第 19 组：v0.10.0 的六项改动（头像 / 主动判定 / 通路验证 / 重置记忆） ---- */
+  const tinyPng =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const avatar = await call("ui.avatar.set", { dataUrl: tinyPng });
+  check("头像能存进本机（data URL）", avatar.dataUrl === tinyPng);
+  const cleared = await call("ui.avatar.set", { dataUrl: null });
+  check("头像能清空、回到名字首字", cleared.dataUrl === null);
+  let avatarRejected = false;
+  try {
+    await call("ui.avatar.set", { dataUrl: "http://example.com/x.png" });
+  } catch {
+    avatarRejected = true;
+  }
+  check("非图片地址会被拒", avatarRejected);
+
+  const tick = await call("proactive.tick", { force: true });
+  check(
+    "主动判定给明确结果（排了 / 被谁拦了）",
+    typeof tick.queued === "boolean" && (tick.queued || typeof tick.blockedBy === "string"),
+  );
+
+  const relay = await call("proactive.verifyRelay", {});
+  check("主动→微信通路如实回报（没开就说没开）", relay.ok === false && relay.message.length > 0, relay.message);
+
+  await call("chat.send", { text: "记住：我叫测试员，生日 3 月 3 日。", clientTs: Date.now() });
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const beforeReset = await call("memory.stats", {});
+  const resetToken = await call("confirm.token", { action: "memory.reset" });
+  const reset = await call("memory.reset", { confirmToken: resetToken.token, keepChat: false });
+  check("重置记忆真的删（记忆与对话一起清）", beforeReset.total > 0 && reset.messages > 0);
+  const historyAfterReset = await call("chat.history", { limit: 50 });
+  const statsAfterReset = await call("memory.stats", {});
+  check(
+    "重置后它不再记得刚才那句",
+    historyAfterReset.messages.length === 0 && statsAfterReset.total === 0,
+    `历史 ${historyAfterReset.messages.length} 条 / 记忆 ${statsAfterReset.total} 条`,
+  );
 } catch (error) {
   check("端到端流程", false, error.message);
 } finally {

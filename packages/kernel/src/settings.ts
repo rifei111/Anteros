@@ -25,6 +25,8 @@ export interface SettingsDefaults {
   "wechat.pythonPath": string;
   /** 通道页展示用：上次体检时间 */
   "wechat.lastCheckTs": number;
+  /** 聊天对象头像（data URL；空字符串=用名字首字） */
+  "ui.agentAvatar": string;
 }
 
 export const DEFAULT_SETTINGS: SettingsDefaults = {
@@ -45,6 +47,7 @@ export const DEFAULT_SETTINGS: SettingsDefaults = {
   "wechat.chatUsername": "filehelper",
   "wechat.pythonPath": "",
   "wechat.lastCheckTs": 0,
+  "ui.agentAvatar": "",
 };
 
 export class SettingsService {

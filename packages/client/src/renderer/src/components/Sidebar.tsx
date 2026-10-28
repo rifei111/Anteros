@@ -38,7 +38,11 @@ export function Sidebar() {
 
       <div className="conv-list">
         <button className="conv-item active" type="button">
-          <div className="conv-avatar">{agentName.slice(0, 1)}</div>
+          {state.agentAvatar ? (
+            <img className="conv-avatar conv-avatar-image" src={state.agentAvatar} alt={agentName} />
+          ) : (
+            <div className="conv-avatar">{agentName.slice(0, 1)}</div>
+          )}
           <div className="conv-main">
             <div className="conv-top">
               <span className="conv-name">{agentName}</span>

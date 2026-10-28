@@ -152,7 +152,18 @@ async function loadSnapshot(): Promise<void> {
     llm: snapshot.llm,
     kernelVersion: snapshot.handshake.kernelVersion,
     dataDir: snapshot.handshake.dataDir,
+    agentAvatar: snapshot.agentAvatar ?? null,
+    proactive: snapshot.proactive ?? null,
   });
+}
+
+/** 重新拉一次快照：改完频率、重置完数据之后用它把界面上的数字对齐。 */
+export async function refreshSnapshot(): Promise<void> {
+  try {
+    await loadSnapshot();
+  } catch {
+    // 快照拉不到不影响当前界面，下一次事件会补上
+  }
 }
 
 async function enterChat(): Promise<void> {

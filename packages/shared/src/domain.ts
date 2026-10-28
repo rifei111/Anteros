@@ -474,6 +474,8 @@ export interface WechatChannelStatus {
   installLog: string[];
   /** 上次体检完成的时间（0 = 还没体检过） */
   lastCheckTs: number;
+  /** 主动消息要不要同时发到这个微信会话（默认关：主动消息只在应用里出现） */
+  relayProactive: boolean;
 }
 export type ActionState = "queued" | "quarantined" | "dispatched" | "cancelled" | "expired";
 
@@ -487,6 +489,23 @@ export interface ActionItem {
   state: ActionState;
   /** 四类主动理由 + 第五类冲动（草案 5.7）；人类可读，落库为文本 */
   reason: string;
+}
+
+/** 主动消息的可读档位摘要：界面上要"常驻"显示当前档位，不能只在设置页里。 */
+export interface ProactiveSummary {
+  level: "off" | "low" | "normal" | "high";
+  intervalMinutes: number;
+  dailyCap: number;
+  /** 是否被"暂停"（panicStop / system.proactivePaused）挡住 */
+  paused: boolean;
+  quietFromHour: number;
+  quietToHour: number;
+  /** 今天已经主动发了多少条 */
+  sentToday: number;
+  lastDeliveredTs: number | null;
+  /** 内置通道是否会把主动消息一并推到微信 */
+  relayToWechat: boolean;
+  wechatReady: boolean;
 }
 
 export interface AuditEntry {
@@ -622,4 +641,8 @@ export interface AppSnapshot {
   /** 未闭合话题（主动燃料） */
   openLoops: MemoryItem[];
   pendingActions: ActionItem[];
+  /** 主动消息档位（常驻显示用；未接通道时也显示） */
+  proactive: ProactiveSummary;
+  /** 聊天对象头像（data URL）；空=用名字首字 */
+  agentAvatar: string | null;
 }

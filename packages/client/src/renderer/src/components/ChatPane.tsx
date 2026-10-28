@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import type { ChatMessage } from "@anteros/shared";
+import type { ChatMessage, ProactiveSummary } from "@anteros/shared";
 import {
   deleteLocalMessage,
   loadOlderMessages,
@@ -24,6 +24,14 @@ interface ContextMenuState {
   y: number;
   message: ChatMessage;
 }
+
+/** 主动消息档位的中文短名（聊天页常驻条与设置页共用一套词）。 */
+const PROACTIVE_LEVEL_TEXT: Record<ProactiveSummary["level"], string> = {
+  off: "关闭",
+  low: "低",
+  normal: "正常",
+  high: "高",
+};
 
 function messageText(message: ChatMessage): string {
   return message.text.replace(/^(> .*\n)+/, "").trim();
@@ -127,6 +135,7 @@ export function ChatPane() {
         key={message.id}
         message={message}
         agentName={agentName}
+        agentAvatar={state.agentAvatar}
         onContextMenu={(event, target) =>
           setMenu({
             x: Math.min(event.clientX, globalThis.innerWidth - 160),
@@ -150,7 +159,11 @@ export function ChatPane() {
   return (
     <main className="chat">
       <header className="chat-head">
-        <div className="chat-head-avatar">{agentInitial}</div>
+        {state.agentAvatar ? (
+          <img className="chat-head-avatar chat-head-avatar-image" src={state.agentAvatar} alt={agentName} />
+        ) : (
+          <div className="chat-head-avatar">{agentInitial}</div>
+        )}
         <div className="chat-head-meta">
           <div className="chat-head-name">{agentName}</div>
           <div className="chat-head-sub">
@@ -186,6 +199,30 @@ export function ChatPane() {
           未配置模型：当前回复来自本地回声（演示模式，不产生云端调用）。
           <button className="link-btn" onClick={() => openAdmin("model")}>
             去配置
+          </button>
+        </div>
+      ) : null}
+
+      {state.proactive ? (
+        <div className="proactive-strip">
+          <span className={`proactive-chip proactive-${state.proactive.level}`}>
+            主动消息 · {PROACTIVE_LEVEL_TEXT[state.proactive.level]}
+          </span>
+          <span className="proactive-detail">
+            {state.proactive.level === "off"
+              ? "当前不会主动找你"
+              : `约 ${state.proactive.intervalMinutes} 分钟一次 · 每天最多 ${state.proactive.dailyCap} 条 · 今天已发 ${state.proactive.sentToday} 条`}
+          </span>
+          {state.proactive.paused ? <span className="proactive-warn">已暂停</span> : null}
+          <span className="proactive-detail">
+            {state.proactive.relayToWechat
+              ? state.proactive.wechatReady
+                ? "会同步到微信"
+                : "微信通道未就绪，只在本机"
+              : "只在本机"}
+          </span>
+          <button className="link-btn" onClick={() => openAdmin("proactive")}>
+            调整
           </button>
         </div>
       ) : null}

@@ -147,7 +147,16 @@ export class WechatChannelService {
       installing: this.installing,
       installLog: this.installLog.slice(-MAX_LOG_LINES),
       lastCheckTs: this.settings.getJson<number>("wechat.lastCheckTs", 0),
+      relayProactive: this.settings.getJson<boolean>("wechat.relayProactive", false) === true,
     };
+  }
+
+  /** 主动消息要不要同时同步到微信（默认关）。 */
+  setRelayProactive(enabled: boolean): WechatChannelStatus {
+    this.settings.setJson("wechat.relayProactive", enabled === true);
+    this.deps.log.info(`wechat relayProactive = ${enabled === true}`);
+    this.publish();
+    return this.status();
   }
 
   /** 事件推送：任何状态变化都推一份全量快照，客户端不用自己拼。 */
@@ -962,6 +971,28 @@ export class WechatChannelService {
       .finally(() => {
         this.sendInFlight = Math.max(0, this.sendInFlight - 1);
       });
+  }
+
+  /** 带结果的发送：给「验证主动消息 → 微信」这类需要如实回报的路径用。 */
+  async sendAsync(text: string): Promise<{ ok: boolean; error?: string }> {
+    const value = (text ?? "").trim();
+    if (value.length === 0) return { ok: false, error: "内容为空" };
+    if (!this.running) return { ok: false, error: "微信通道没有运行：先在通道页开启它" };
+    this.sendInFlight += 1;
+    try {
+      await this.request("send", { text: value, chatUsername: this.chatUsername() }, 60_000);
+      this.lastOutboundTs = Date.now();
+      this.outboundCount += 1;
+      this.publish();
+      return { ok: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.lastError = `发送失败：${message}`;
+      this.publish();
+      return { ok: false, error: message };
+    } finally {
+      this.sendInFlight = Math.max(0, this.sendInFlight - 1);
+    }
   }
 
   private onData(chunk: Buffer): void {

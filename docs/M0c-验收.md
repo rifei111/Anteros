@@ -353,3 +353,27 @@ New version 0.6.1 has been downloaded to ...\pending\Anteros-Setup-0.6.1-x64.exe
 - 新增 2 组用例（`packages/kernel/test/expression.prompt.test.ts`）：约束集合按模式切换；切到 `full_human` 后整份系统提示词里不再出现"承认自己是 AI"、"不要编造具体场景"，且仍含"关于对方不要替他编""不碰自伤"。
 - `vitest` 17 文件 103 用例全绿；内核冒烟 71/71；`check-boundaries` 通过；客户端 typecheck / build 通过。
 - 界面文案同步：`packages/client/src/renderer/src/admin/tabs/ExpressionTab.tsx` 的风险页与确认弹窗改成"开放这两条 + 只告知一次"的口径。
+
+## 19. v0.10.0 增补（头像 / 重置 / 主动消息自检 / 卸载）
+
+### 19.1 做了什么
+
+1. **自定义头像**：`ui.avatar.set { dataUrl }` 落 `settings`（只接受 `data:image/` 开头，上限约 2MB），`state.snapshot` 带 `agentAvatar`；聊天页头像与人格页预览都用它，无图退回名字首字。用户自己的气泡不再渲染「我」。
+2. **重置记忆**（`memory.reset`）：一次清记忆三件套（情节/语义事实/未闭合话题）+ 叙事槽位 + 使用习惯，默认连 `messages`/`turns`/`idempotency` 一起清，并删媒体目录；返回将被清掉的行数，界面先给数字再要 token。
+3. **整体重置**（`system.resetData`）：清内容表与运行状态，可选保留 `llm.*` 密钥类设置、`plugin-runtime/` 运行环境、插件配置与授权；重置后重建目录与种子行。
+4. **卸载**（客户端主进程 `runUninstaller`）：从安装目录找 `Uninstall*.exe` 以 `/S` 调起，`keepData` 决定是否先删数据目录；开发模式给出"只在安装版可用"的提示而不是抛错。
+5. **主动消息**：`proactive.summary` 进 `state.snapshot`（档位、间隔、日上限、静默时段、今日已发、上次发送、出口），聊天页顶部常驻状态条；`proactive.tick {force}` 手动跑一次判定并回报 `queued/blockedBy`；`channels.wechat.setRelay {enabled}` 决定主动消息是否同时发到微信会话，`proactive.verifyRelay` 真发一条自检消息验证通路；投递路径在 `dispatch()` 里串行执行，失败只记事件不回滚。
+6. **废弃通道插件**：磁盘上已不存在的插件（如 `channel.wechat-replica`）不再出现在插件/通道列表，`registry.missing()` 生效；数据库行与授权保留，便于将来恢复。
+
+### 19.2 验证
+
+- 冒烟 78 项全过，新增第 19 组 7 项：头像存取与非法地址拒绝、主动判定有明确结果、验证通路如实回报（通道没开就说没开）、重置记忆真的删（历史 0 条 / 记忆 0 条）。
+- `vitest` 17 文件 103 用例全绿；`check-boundaries` 通过；kernel/client typecheck 0 error。
+- 面板文本自检（`ANTEROS_SMOKE_REPORT`）：人格页出现「头像/选择图片」，主动消息页出现「现在想不想说话/立即检查一次/验证一次：主动消息 → 微信/当前档位：high」，聊天页顶部出现「主动消息 · 高约 45 分钟一次 · 每天最多 6 条 · 今天已发 0 条」。
+- 未验证（诚实说明）：真实点击选图弹窗（自动化只能到按钮）、真机微信收到主动消息（需要打开通道并开启 relay）、卸载程序实际执行（会关掉当前窗口，需人工确认）。
+
+### 19.3 已知取舍
+
+- 记忆重置是"物理删除 + 删对话"，不做软删除墓碑；重置后重启也不会"复活"。
+- 头像存在数据库里（不是文件），导出数据包会带上；换机器迁移时一并搬走。
+- 主动消息同步微信是单条整发（多条分条会用换行拼在一个气泡里），避免在微信里连发刷屏。

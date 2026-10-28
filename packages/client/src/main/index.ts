@@ -16,8 +16,9 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 import { mkdir, writeFile } from "node:fs/promises";
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { IPC_CHANNEL, UPDATE_EVENT_CHANNEL, UPDATE_METHODS, type IpcResult } from "../common/protocol";
+import { IPC_CHANNEL, UNINSTALL_METHOD, UPDATE_EVENT_CHANNEL, UPDATE_METHODS, type IpcResult } from "../common/protocol";
 import { KernelCallError, KernelClient } from "./kernel-client";
+import { runUninstaller } from "./uninstall";
 import { AppUpdater, type UpdateStatus } from "./updater";
 
 const WINDOW_WIDTH = 1180;
@@ -130,6 +131,16 @@ function startUpdater(): void {
   });
   updater.init();
   registerUpdaterHandlers();
+}
+
+/** 卸载：卸载程序在安装目录里；`keepData=false` 时先删数据目录再交给 NSIS。 */
+function registerUninstallHandler(): void {
+  ipcMain.handle(UNINSTALL_METHOD, (_event, options: unknown) => {
+    const keepData = Boolean((options as { keepData?: boolean } | null)?.keepData ?? true);
+    const result = runUninstaller({ keepData, dataDir: resolveDataDir() });
+    console.log(`[uninstall] keepData=${keepData} → ${result.started ? result.uninstaller : result.message}`);
+    return { started: result.started, message: result.message };
+  });
 }
 
 function registerIpcHandlers(client: KernelClient): void {
@@ -693,6 +704,7 @@ if (!gotLock) {
     });
 
     registerIpcHandlers(client);
+    registerUninstallHandler();
     startUpdater();
 
     mainWindow = createWindow();

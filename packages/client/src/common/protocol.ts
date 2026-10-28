@@ -33,6 +33,18 @@ export const UPDATE_METHODS = {
   install: "app.update.install",
 } as const;
 
+/** 卸载：渲染进程点按钮 → 主进程调卸载程序（数据留不留由渲染层决定）。 */
+export const UNINSTALL_METHOD = "app.uninstall";
+
+export interface UninstallRequestView {
+  keepData: boolean;
+}
+
+export interface UninstallResultView {
+  started: boolean;
+  message: string;
+}
+
 /** 与 packages/shared/src/version.ts 保持一致。 */
 export const PIPE_PREFIX = "anteros-kernel";
 export const DATA_DIR_NAME = "anteros-data";
@@ -81,5 +93,9 @@ export interface ExtendedClientBridge extends ClientBridge {
     download(): Promise<UpdateStatusView | null>;
     install(): Promise<UpdateStatusView | null>;
     onEvent(handler: (status: UpdateStatusView) => void): () => void;
+  };
+  /** 卸载（数据栏最底下；keepData=false 会先删数据目录） */
+  uninstaller: {
+    run(options: UninstallRequestView): Promise<UninstallResultView>;
   };
 }

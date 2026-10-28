@@ -19,6 +19,7 @@ import type {
   PersonaPreset,
   PluginInfo,
   PluginRuntimeStatus,
+  ProactiveSummary,
   ChannelInfo,
   RelationState,
   SystemHealth,
@@ -96,6 +97,10 @@ export interface AppState {
   plugins: PluginInfo[];
   /** 插件运行环境状态：key 是 pluginId（`event.runtime` 与 `plugins.runtime.*` 都写这里） */
   pluginRuntime: Record<string, PluginRuntimeStatus>;
+  /** 聊天对象头像（data URL）；null = 用名字首字 */
+  agentAvatar: string | null;
+  /** 主动消息档位摘要（常驻显示；管理面板关了也要看得见） */
+  proactive: ProactiveSummary | null;
   /** 应用内更新状态（主进程推、界面只读）。 */
   updateStatus: UpdateStatusView | null;
   channels: ChannelInfo[];
@@ -137,6 +142,8 @@ const initialState: AppState = {
   cost: null,
   plugins: [],
   pluginRuntime: {},
+  agentAvatar: null,
+  proactive: null,
   updateStatus: null,
   channels: [],
   messages: [],
@@ -190,6 +197,16 @@ export function useAppState(): AppState {
 /** 主进程推来的更新状态：原样落到 store，界面只读；不做乐观更新。 */
 export function applyUpdateStatus(status: UpdateStatusView): void {
   setState({ updateStatus: status });
+}
+
+/** 聊天对象头像：内核快照 / `ui.avatar.set` 返回值都走这里。 */
+export function applyAgentAvatar(dataUrl: string | null): void {
+  setState({ agentAvatar: dataUrl });
+}
+
+/** 主动消息档位摘要：快照与 `event.proactive` 之后的重拉都写这里。 */
+export function applyProactiveSummary(summary: ProactiveSummary | null): void {
+  setState({ proactive: summary });
 }
 /** 写入一条运行环境状态：`event.runtime` 推送与 RPC 返回值共走这一条路。 */
 export function applyPluginRuntime(status: PluginRuntimeStatus): void {

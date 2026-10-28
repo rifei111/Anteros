@@ -214,7 +214,12 @@ function findInstaller() {
     names = [];
   }
   if (names.length === 0) return { releaseDir, installer: null };
-  names.sort();
+  // 按 mtime 取最新：字符串排序会把 0.10.0 排到 0.9.0 前面（"1" < "9"），比错了版本
+  names.sort((left, right) => {
+    const a = fs.statSync(path.join(releaseDir, left)).mtimeMs;
+    const b = fs.statSync(path.join(releaseDir, right)).mtimeMs;
+    return a - b;
+  });
   const file = path.join(releaseDir, names[names.length - 1]);
   return { releaseDir, installer: file };
 }

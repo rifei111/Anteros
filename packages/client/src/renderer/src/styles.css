@@ -2642,3 +2642,117 @@ ul {
   cursor: pointer;
   font-size: 12px;
 }
+
+/* ── v0.10.0：头像、重置、主动消息手动判定 ─────────────────── */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.btn-disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.avatar-preview-row {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+
+.avatar-preview-image,
+.avatar-preview-fallback {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  background: var(--bg-soft, rgba(0, 0, 0, 0.04));
+}
+
+.avatar-preview-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--fg-soft, #666);
+}
+
+.check-inline {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--fg-soft, #666);
+  user-select: none;
+}
+
+.kv-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.kv-list li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.kv-list li > span {
+  color: var(--fg-soft, #666);
+  min-width: 64px;
+}
+
+.ok-note {
+  color: var(--ok, #2f7d32);
+}
+
+.chat-proactive-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--fg-soft, #666);
+  padding: 6px 14px;
+  border-bottom: 1px dashed var(--line);
+}
+
+.chat-proactive-bar .seg-btn {
+  padding: 2px 10px;
+  font-size: 12px;
+}
+
+/* 头像图片：按需显示；没有图片时退回首字 */
+.bubble-avatar-img {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+}
+
+/* 头像图片：占位圆与图片尺寸一致，防止加载完撑开布局 */
+.avatar-image {
+  object-fit: cover;
+  padding: 0;
+}
+
+.chat-head-avatar-image {
+  object-fit: cover;
+  padding: 0;
+}

@@ -8,7 +8,7 @@
  * 单机闭环里没有推送通道，发不出去就退化成本机通知（core.tray-notify 插件负责）。
  */
 import { ACTION_QUARANTINE_MS } from "@anteros/shared";
-import type { ActionItem } from "@anteros/shared";
+import type { ActionItem, ProactiveSummary } from "@anteros/shared";
 import type { ChatDeps, KernelDeps } from "../contracts.js";
 import type { SettingsService } from "../settings.js";
 import type { ConsentService } from "./consent.js";
@@ -30,6 +30,8 @@ export class ProactiveService {
   private timer: NodeJS.Timeout | null = null;
   private pending: { timer: NodeJS.Timeout } | null = null;
   private ticking = false;
+  /** 主动消息的第二个出口（微信）：由 app.ts 注入，没注入就只发在应用里。 */
+  private relay: ((text: string) => Promise<{ ok: boolean; error?: string }>) | null = null;
 
   constructor(
     private readonly deps: KernelDeps,
@@ -38,6 +40,10 @@ export class ProactiveService {
     private readonly cost: CostService,
     private readonly settings: SettingsService,
   ) {}
+
+  setRelay(relay: ((text: string) => Promise<{ ok: boolean; error?: string }>) | null): void {
+    this.relay = relay;
+  }
 
   start(): void {
     if (this.timer) return;
@@ -85,6 +91,76 @@ export class ProactiveService {
   getLevel(): ProactiveLevel {
     const raw = this.settings.get("plan.proactiveLevel");
     return (raw as ProactiveLevel) ?? "normal";
+  }
+
+  /** 档位的"常驻显示"：管理面板关掉以后，聊天页也用这个摘要显示当前频率。 */
+  summary(): ProactiveSummary {
+    const now = Date.now();
+    const level = this.getLevel();
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0);
+    const sentToday = this.deps.db.get<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM turns WHERE agent_id = ? AND trigger IN ('proactive','impulse') AND created_ts >= ?",
+      [this.deps.agentId, startOfDay.getTime()],
+    );
+    const last = this.deps.db.get<{ ts: number | null }>(
+      "SELECT MAX(created_ts) AS ts FROM action_queue WHERE agent_id = ? AND state = 'dispatched'",
+      [this.deps.agentId],
+    );
+    return {
+      level,
+      intervalMinutes: level === "off" ? 0 : Math.round(LEVEL_INTERVAL_MS[level] / 60_000),
+      dailyCap: DAILY_CAP[level],
+      paused: this.settings.get("system.proactivePaused") || this.settings.get("system.panicUntilTs") > now,
+      quietFromHour: QUIET_FROM_HOUR,
+      quietToHour: QUIET_TO_HOUR,
+      sentToday: sentToday?.count ?? 0,
+      lastDeliveredTs: last?.ts ?? null,
+      relayToWechat: false,
+      wechatReady: false,
+    };
+  }
+
+  /**
+   * 立刻跑一次判定（自检用）。force=true 时越过"距上条的时间间隔 / 当日上限 / 关系阶段"，
+   * 但仍然守：声明闸、暂停、全局停止、档位 off。静默时段在 force 下也放行——
+   * 这是 owner 自己的显式动作，不是"半夜突然找上门"。
+   */
+  async tickNow(force = false): Promise<{
+    queued: boolean;
+    actionId: number | null;
+    reason: string | null;
+    blockedBy: string | null;
+  }> {
+    const now = Date.now();
+    const blocked = (why: string) => ({ queued: false, actionId: null, reason: null, blockedBy: why });
+    if (!this.consent.hasAccepted("app")) return blocked("还没过声明闸");
+    if (this.settings.get("system.proactivePaused")) return blocked("主动消息已被暂停");
+    if (this.settings.get("system.panicUntilTs") > now) return blocked("处于全局停止状态");
+    const level = this.getLevel();
+    if (level === "off") return blocked("档位是「关闭」，先选一个档位再试");
+
+    const world = this.ports.mind.tickWorld(now);
+    const drives = this.ports.mind.tickDrives(now);
+    this.ports.emit("event.world", { world });
+    this.ports.emit("event.drives", { drives });
+
+    if (!force) {
+      if (!this.passesGate0(now, level, world.presence)) return blocked("被静默时段 / 频控 / 当日上限 / 关系阶段挡住（勾「强制」可越过）");
+    } else if (world.presence === "sleep") {
+      return blocked("它正在睡觉（在场状态 sleep）；勾在这里也不叫醒它，换个时间或先把手机会话打开");
+    }
+
+    const candidates = this.ports.mind.candidateActions(now);
+    if (candidates.length === 0) {
+      return blocked("没有可用的主动理由：记忆里还没有未闭合话题，也没有今天的时间锚点");
+    }
+    const action = candidates[0]!;
+    const actionId = this.enqueue(action, now);
+    if (actionId === null) return blocked("刚排过一条同类动作（同一分钟内只排一次），等一分钟再试");
+    const payload = (action.payload ?? {}) as Record<string, unknown>;
+    const reason = typeof payload.reason === "string" ? payload.reason : action.kind;
+    return { queued: true, actionId, reason, blockedBy: null };
   }
 
   private async tick(clock: "presence" | "world"): Promise<void> {
@@ -145,7 +221,7 @@ export class ProactiveService {
   }
 
   /** 隔离窗口：0.5–2s 内用户说话就取消，避免"刚打完字它先开口"。 */
-  private enqueue(action: ActionItem, now: number): void {
+  private enqueue(action: ActionItem, now: number): number | null {
     const idemKey = `${action.kind}:${Math.floor(now / 60_000)}`;
     const actionPayload = (action.payload ?? {}) as Record<string, unknown>;
     const reason = typeof actionPayload.reason === "string" ? actionPayload.reason : action.kind;
@@ -167,7 +243,7 @@ export class ProactiveService {
         now,
       ],
     );
-    if (inserted.changes === 0) return;
+    if (inserted.changes === 0) return null;
     const actionId = inserted.lastInsertRowid;
     this.ports.emit("event.proactive", { state: "queued", actionId, kind: action.kind });
 
@@ -177,6 +253,7 @@ export class ProactiveService {
     }, ACTION_QUARANTINE_MS);
     timer.unref?.();
     this.pending = { timer };
+    return actionId;
   }
 
   private async dispatch(actionId: number): Promise<void> {
@@ -239,6 +316,25 @@ export class ProactiveService {
         if (index < plan.parts.length - 1) await sleep(part.delayAfterMs);
       }
       this.cost.record({ kind: "proactive", model: plan.model, inputTokens: plan.usage.inputTokens, outputTokens: plan.usage.outputTokens });
+      // 出口二选一：只发在应用里，或同时同步到用户指定的微信会话（默认关）。
+      const relay = this.relay;
+      if (relay && this.settings.getJson<boolean>("wechat.relayProactive", false) === true) {
+        const text = plan.parts.map((item) => item.text).join("\n").trim();
+        if (text.length > 0) {
+          void relay(text)
+            .then((result) => {
+              this.ports.emit("event.proactive", {
+                state: result.ok ? "relayed" : "relay-failed",
+                actionId,
+                turnId,
+                message: result.ok ? null : result.error ?? "同步到微信失败",
+              });
+            })
+            .catch((error: unknown) => {
+              this.deps.log.warn(`proactive relay failed: ${(error as Error)?.message ?? String(error)}`);
+            });
+        }
+      }
       this.deps.db.run("UPDATE turns SET plan = ?, ctx_snapshot = ?, prompt = ?, model = ?, output = ?, delivered_ts = ?, outcome = 'delivered' WHERE id = ?", [
         JSON.stringify({ parts: plan.parts }),
         JSON.stringify(plan.ctxSnapshot ?? null),

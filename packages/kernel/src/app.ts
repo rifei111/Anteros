@@ -17,6 +17,7 @@ import type {
   Persona,
   PersonaBlueprint,
   PluginInfo,
+  ProactiveSummary,
   TurnReplay,
 } from "@anteros/shared";
 import type { Runtime } from "./bootstrap.js";
@@ -31,6 +32,7 @@ import { PluginService } from "./services/plugins.js";
 import { ChannelService } from "./services/channels.js";
 import { WechatChannelService } from "./services/wechat.js";
 import { ExportService } from "./services/export.js";
+import { ResetService } from "./services/reset.js";
 import { SystemService } from "./services/system.js";
 import { ChatService } from "./services/chat.js";
 import { ProactiveService } from "./services/proactive.js";
@@ -81,6 +83,7 @@ export class App {
   private readonly system: SystemService;
   private readonly chat: ChatService;
   private readonly proactive: ProactiveService;
+  private readonly reset: ResetService;
   private readonly wechat: WechatChannelService;
   private readonly startedTs = Date.now();
   private readonly sessionId: string;
@@ -108,6 +111,7 @@ export class App {
     this.channels = new ChannelService(this.deps, this.plugins);
     this.exporter = new ExportService(this.deps, { dataDir: runtime.dataDir });
     this.system = new SystemService(this.deps, { plugins: this.plugins, channels: this.channels });
+    this.reset = new ResetService(this.deps.db, runtime.dataDir, runtime.logger.child("reset"));
 
     const ports: ChatDeps = {
       deps: this.deps,
@@ -140,6 +144,8 @@ export class App {
       dataDir: this.runtime.dataDir,
     });
     this.proactive = new ProactiveService(this.deps, ports, runtime.consent, runtime.cost, runtime.settings);
+    // 主动消息的第二个出口：只在开关打开时才真的发到微信
+    this.proactive.setRelay((text) => this.wechat.sendAsync(text));
     this.proactive.start();
   }
 
@@ -268,6 +274,14 @@ export class App {
       }
       case "memory.stats":
         return this.memory.stats(this.deps.agentId);
+      case "memory.reset": {
+        this.runtime.permissions.assertOwner("重置记忆");
+        this.runtime.permissions.consumeConfirm(p.confirmToken, "memory.reset");
+        const keepChat = p.keepChat === true;
+        const result = this.reset.resetMemory(this.deps.agentId, { keepChat });
+        this.runtime.audit.log("memory.reset", { actorRole: "owner", after: { ...result, keepChat } });
+        return result;
+      }
       case "memory.export": {
         const file = path.join(this.runtime.dirs.exports, `memory-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
         const payload = {
@@ -347,6 +361,22 @@ export class App {
       case "persona.applyPreset": {
         this.runtime.permissions.assertOwner("套用人格预设");
         return this.mind.applyPreset(String(p.presetId));
+      }
+      case "ui.avatar.get":
+        return { dataUrl: this.avatarDataUrl() };
+      case "ui.avatar.set": {
+        this.runtime.permissions.assertOwner("修改聊天对象头像");
+        const raw = typeof p.dataUrl === "string" ? p.dataUrl.trim() : "";
+        if (raw !== "" && !raw.startsWith("data:image/")) {
+          throw new AnterosError(ERROR_CODES.EINVALID, "头像必须是图片（data:image/... 形式）");
+        }
+        // 2MB 的 data URL 已经够一张头像；再大就不要往 SQLite 里塞了
+        if (raw.length > 2_000_000) {
+          throw new AnterosError(ERROR_CODES.EINVALID, "这张图太大了（超过约 1.5MB），换一张小一点的");
+        }
+        this.runtime.settings.set("ui.agentAvatar", raw);
+        this.runtime.audit.log("ui.avatar_set", { actorRole: "owner", after: { bytes: raw.length } });
+        return { dataUrl: this.avatarDataUrl() };
       }
       case "relation.get":
         return this.mind.getRelation();
@@ -455,6 +485,36 @@ export class App {
         const input = (params ?? {}) as { action?: unknown };
         return this.wechat.doctor(input.action === "dump-account" ? "dump-account" : "diagnose-keys");
       }
+      case "channels.wechat.setRelay": {
+        this.runtime.permissions.assertOwner("设置主动消息同步微信");
+        const input = (params ?? {}) as { enabled?: unknown };
+        const status = this.wechat.setRelayProactive(input.enabled === true);
+        this.runtime.audit.log("wechat.setRelay", {
+          actorRole: "owner",
+          after: { enabled: status.relayProactive },
+        });
+        return status;
+      }
+      /** 验证「主动消息 → 微信」这条路：真发一条带标记的自检消息，如实回报成败。 */
+      case "proactive.verifyRelay": {
+        this.runtime.permissions.assertOwner("验证主动消息通路");
+        await this.runtime.consent.requireConsent();
+        const input = (params ?? {}) as { text?: unknown };
+        const text = typeof input.text === "string" && input.text.trim().length > 0
+          ? input.text.trim()
+          : "【自检】这是一条主动消息通路检查：你在微信里看到它，说明这条线是通的。";
+        const sent = await this.wechat.sendAsync(text);
+        this.runtime.audit.log("proactive.verifyRelay", {
+          actorRole: "owner",
+          after: { ok: sent.ok, error: sent.error ?? null },
+        });
+        return {
+          ok: sent.ok,
+          message: sent.ok
+            ? "已经发到微信会话了：去那个会话里看看有没有收到。"
+            : sent.error ?? "发送失败，原因不明。",
+        };
+      }
 
       /* ---------------- 世界 / 动机 / 主动 ---------------- */
       case "world.state":
@@ -473,6 +533,12 @@ export class App {
         const result = this.proactive.setFrequency(p.level);
         this.runtime.audit.log("proactive.set_frequency", { actorRole: "owner", after: { level: p.level } });
         return { level: result.level };
+      }
+      case "proactive.tick": {
+        this.runtime.permissions.assertOwner("立即触发一次主动判定");
+        const result = this.proactive.tickNow(p.force === true);
+        this.runtime.audit.log("proactive.tick", { actorRole: "owner", after: { ...result, force: p.force === true } });
+        return result;
       }
 
       /* ---------------- 回放 / 成本 / 模型 ---------------- */
@@ -579,6 +645,18 @@ export class App {
         this.runtime.audit.log("import.bundle", { actorRole: "owner", after: result });
         return result;
       }
+      case "system.resetData": {
+        this.runtime.permissions.assertOwner("整体重置数据");
+        this.runtime.permissions.consumeConfirm(p.confirmToken, "system.resetData");
+        const options = {
+          keepApiKey: p.keepApiKey === true,
+          keepRuntime: p.keepRuntime === true,
+          keepPlugins: p.keepPlugins === true,
+        };
+        const result = this.reset.resetData(this.deps.agentId, options);
+        this.runtime.audit.log("system.reset_data", { actorRole: "owner", after: { ...options, tables: result.tables } });
+        return result;
+      }
 
       default:
         throw new AnterosError(ERROR_CODES.ENOTFOUND, `未知的内核方法：${method}`);
@@ -675,7 +753,21 @@ export class App {
       pendingActions: this.proactive
         .list(20)
         .filter((action) => action.state === "queued" || action.state === "quarantined"),
+      proactive: this.proactiveSummary(),
+      agentAvatar: this.avatarDataUrl(),
     };
+  }
+
+  private proactiveSummary(): ProactiveSummary {
+    const base = this.proactive.summary();
+    const wechat = this.wechat.status();
+    return { ...base, relayToWechat: wechat.enabled && wechat.relayProactive, wechatReady: wechat.state === "ready" };
+  }
+
+  /** 头像存在 settings 里（data URL）；空字符串对外统一成 null，界面就知道回退首字。 */
+  private avatarDataUrl(): string | null {
+    const raw = this.runtime.settings.get("ui.agentAvatar");
+    return typeof raw === "string" && raw.startsWith("data:image/") ? raw : null;
   }
 
   private health() {

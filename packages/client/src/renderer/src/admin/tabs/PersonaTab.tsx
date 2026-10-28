@@ -1,8 +1,18 @@
 import type { Persona, PersonaBlueprint, PersonaCompileResult, PersonaTraits } from "@anteros/shared";
 import { useEffect, useState } from "react";
 import { invoke } from "../../lib/kernel";
-import { pushToast, setState, useAppState } from "../../lib/store";
+import { applyAgentAvatar, pushToast, setState, useAppState } from "../../lib/store";
 import { LoadingLine, Section, reportError, useLoad } from "../helpers";
+
+/** 本地图片 → data URL（只在渲染层做，不经过主进程）。 */
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(new Error("读不出这张图"));
+    reader.readAsDataURL(file);
+  });
+}
 
 /**
  * 人格从「用户写一段话」编译而来：先用一段描述让内核（规则引擎 / 模型）推导出草案，
@@ -302,8 +312,68 @@ export function PersonaTab() {
   const rationaleWhy = (key: string): string | null =>
     compiled?.blueprint.rationale.find((item) => item.key === key)?.why ?? null;
 
+  /** 图片在渲染层转 data URL 再交给内核存：主进程不用碰文件系统。 */
+  const saveAvatar = async (dataUrl: string | null): Promise<void> => {
+    if (!editable) return;
+    try {
+      const result = await invoke("ui.avatar.set", { dataUrl });
+      applyAgentAvatar(result.dataUrl);
+      pushToast("success", result.dataUrl ? "头像已换" : "已改回名字首字", "");
+    } catch (error) {
+      reportError(error);
+    }
+  };
+
+  const pickAvatar = async (file: File | null): Promise<void> => {
+    if (!file) return;
+    if (file.size > 1_500_000) {
+      pushToast("warn", "图片太大", "换一张 1.5MB 以内的（先压缩一下也行）");
+      return;
+    }
+    try {
+      await saveAvatar(await readFileAsDataUrl(file));
+    } catch (error) {
+      reportError(error);
+    }
+  };
+
   return (
     <div className="panel-stack">
+      <Section
+        title="头像"
+        hint="聊天页里她的头像。选一张本地图片，存在本机数据库里（不上传）。"
+        action={
+          <div className="row-actions">
+            <label className={editable ? "btn" : "btn btn-disabled"}>
+              {state.agentAvatar ? "换一张" : "选择图片"}
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif"
+                className="visually-hidden"
+                disabled={!editable}
+                onChange={(event) => void pickAvatar(event.target.files?.[0] ?? null)}
+              />
+            </label>
+            {state.agentAvatar ? (
+              <button className="btn btn-ghost" disabled={!editable} onClick={() => void saveAvatar(null)}>
+                用回名字首字
+              </button>
+            ) : null}
+          </div>
+        }
+      >
+        <div className="avatar-preview-row">
+          {state.agentAvatar ? (
+            <img className="avatar-preview-image" src={state.agentAvatar} alt={persona.name} />
+          ) : (
+            <div className="avatar-preview-fallback">{persona.name.slice(0, 1)}</div>
+          )}
+          <p className="prose muted">
+            建议正方形、512px 以内；太大的图会被拒（超过约 1.5MB）。你自己的消息不显示头像——那是聊天窗，不是名片。
+          </p>
+        </div>
+      </Section>
+
       <Section
         title="用一段话描述她"
         hint={ownerHint ?? "写得越具体，编译出来越像；编译只是一份草案，改到满意再应用。"}

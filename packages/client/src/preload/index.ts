@@ -16,7 +16,15 @@ import type {
   KernelParams,
   KernelResult,
 } from "@anteros/shared";
-import { IPC_CHANNEL, UPDATE_EVENT_CHANNEL, UPDATE_METHODS, type IpcResult, type UpdateStatusView } from "../common/protocol";
+import {
+  IPC_CHANNEL,
+  UNINSTALL_METHOD,
+  UPDATE_EVENT_CHANNEL,
+  UPDATE_METHODS,
+  type IpcResult,
+  type UninstallResultView,
+  type UpdateStatusView,
+} from "../common/protocol";
 import type { ExtendedClientBridge } from "../common/protocol";
 
 /** 更新相关能力：状态查询、检查、下载、重启安装、订阅状态变化。 */
@@ -40,7 +48,7 @@ function toBridgeError(failure: { code: string; message: string; hint?: string; 
   return new BridgeError(failure.code, failure.message, failure.hint, failure.detail);
 }
 
-const bridge: ClientBridge & { quitApp: () => Promise<void>; updates: UpdatesBridge } = {
+const bridge: ClientBridge & { quitApp: () => Promise<void>; updates: UpdatesBridge; uninstaller: ExtendedClientBridge["uninstaller"] } = {
   async invoke<M extends KernelMethod>(method: M, params: KernelParams<M>): Promise<KernelResult<M>> {
     const result: unknown = await ipcRenderer.invoke(IPC_CHANNEL.invoke, method, params);
     const envelope = result as IpcResult<unknown>;
@@ -124,6 +132,13 @@ const bridge: ClientBridge & { quitApp: () => Promise<void>; updates: UpdatesBri
       return () => {
         ipcRenderer.removeListener(UPDATE_EVENT_CHANNEL, listener);
       };
+    },
+  },
+
+  uninstaller: {
+    async run(options) {
+      const result: unknown = await ipcRenderer.invoke(UNINSTALL_METHOD, options);
+      return (result ?? { started: false, message: "主进程没有返回结果" }) as UninstallResultView;
     },
   },
 };

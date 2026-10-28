@@ -113,6 +113,14 @@ export interface KernelApi {
   "memory.get": MethodSpec<{ id: number }, { item: MemoryItem | null }>;
   "memory.delete": MethodSpec<{ id: number }, { deleted: boolean }>;
   "memory.deleteAll": MethodSpec<{ confirmToken: string }, { deleted: number }>;
+  /**
+   * 重置记忆：真的"忘掉"一个人需要同时清掉长期记忆、未闭合话题、叙事槽位与聊天历史
+   * （只删记忆行、聊天记录还在上下文里，模型还是会"记得"）。
+   */
+  "memory.reset": MethodSpec<
+    { confirmToken: string; keepChat?: boolean },
+    { memories: number; openLoops: number; narrative: number; messages: number; turns: number }
+  >;
   "memory.stats": MethodSpec<
     Record<string, never>,
     { episodic: number; semantic: number; openLoops: number; persona: number; pinned: number; total: number }
@@ -134,6 +142,9 @@ export interface KernelApi {
   "persona.compile": MethodSpec<{ text: string }, PersonaCompileResult>;
   /** 把编译结果（用户可微调过）落库；等价于一次 owner 显式编辑人格。 */
   "persona.applyBlueprint": MethodSpec<{ blueprint: PersonaBlueprint }, Persona>;
+  /** 聊天对象头像：data URL（空=回退到名字首字）。客户端在渲染层选图后转 data URL 传进来。 */
+  "ui.avatar.get": MethodSpec<Record<string, never>, { dataUrl: string | null }>;
+  "ui.avatar.set": MethodSpec<{ dataUrl: string | null }, { dataUrl: string | null }>;
 
   "relation.get": MethodSpec<Record<string, never>, RelationState>;
   /** 完全体模式：owner 专属 + 二次确认 token（草案 2.8）。 */
@@ -179,11 +190,23 @@ export interface KernelApi {
   "channels.wechat.disable": MethodSpec<Record<string, never>, WechatChannelStatus>;
   "channels.wechat.setChat": MethodSpec<{ chatUsername: string }, WechatChannelStatus>;
   "channels.wechat.doctor": MethodSpec<{ action: "dump-account" | "diagnose-keys" }, { ok: boolean; output: string }>;
+  /** 主动消息要不要同时同步到这个微信会话（默认关） */
+  "channels.wechat.setRelay": MethodSpec<{ enabled: boolean }, WechatChannelStatus>;
 
   "world.state": MethodSpec<Record<string, never>, WorldState>;
   "drives.state": MethodSpec<Record<string, never>, DriveState>;
   "proactive.list": MethodSpec<Record<string, never>, { pending: ActionItem[]; recent: ActionItem[] }>;
   "proactive.setFrequency": MethodSpec<{ level: "off" | "low" | "normal" | "high" }, { level: string }>;
+  /**
+   * 立刻跑一次主动判定（owner 自检用）：force=true 时跳过"距上条的时间间隔/当日上限/关系阶段"，
+   * 但仍然守静默时段、pause、panic、档位 off。返回这次有没有排进队列。
+   */
+  "proactive.tick": MethodSpec<
+    { force?: boolean },
+    { queued: boolean; actionId: number | null; reason: string | null; blockedBy: string | null }
+  >;
+  /** 验证「主动消息 → 微信」通路：真发一条带标记的自检消息，如实回报成败 */
+  "proactive.verifyRelay": MethodSpec<{ text?: string }, { ok: boolean; message: string }>;
 
   "turns.list": MethodSpec<
     { limit?: number },
@@ -233,6 +256,19 @@ export interface KernelApi {
   "system.shutdown": MethodSpec<Record<string, never>, { ok: true }>;
   "export.bundle": MethodSpec<Record<string, never>, { path: string; bytes: number }>;
   "import.bundle": MethodSpec<{ path: string }, { imported: number; message: string }>;
+  /**
+   * 整体重置：清空本机数据。三个 keep 开关对应界面上的三个复选框；
+   * 不管怎么选，人格/关系/驱动/日程都会回到初始态，只是"要不要留下密钥、运行环境、插件配置"由你决定。
+   */
+  "system.resetData": MethodSpec<
+    { confirmToken: string; keepApiKey?: boolean; keepRuntime?: boolean; keepPlugins?: boolean },
+    {
+      tables: Record<string, number>;
+      removedDirs: string[];
+      kept: string[];
+      resetSettings: number;
+    }
+  >;
 }
 
 export interface PersonaPreset {
