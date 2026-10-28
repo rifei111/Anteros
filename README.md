@@ -71,7 +71,7 @@ Anteros 不是"套壳聊天框"，也不是"微信机器人"。它的本体是�
 
 已实测通过（`npm.cmd run verify` + 真机跑打包产物）：
 
-- `tsc --noEmit` 全工作区 0 error，`vitest` 17 文件 / 101 用例全绿；
+- `tsc --noEmit` 全工作区 0 error，`vitest` 17 文件 / 103 用例全绿；
 - 内核端到端冒烟 71 项全过（真起内核进程 + 命名管道 + 声明闸拦截 + 分条与打字节奏 + 回放 + 成本硬上限 + 导出入 + 审计不留正文 + 一键停用 + 人设编译与参数钳位 + 插件授权/密钥/启用全链路 + 运行环境整包安装与按文件增量升级 + 内置微信通道默认关闭与风险确认闸）；
 - 插件随内核自动拉起：`core.dashboard` / `core.memory-extract` / `core.tray-notify` / `core.world-info` 实测 `running`，
   `core.media` 缺密钥时 `blocked`（不假成功）；未过声明闸时插件只 `blocked`，勾完九条自动补启动；
