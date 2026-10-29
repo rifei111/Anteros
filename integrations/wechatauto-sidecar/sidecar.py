@@ -722,6 +722,48 @@ def method_poll(params: Dict[str, Any]) -> Dict[str, Any]:
 
 # 单条消息的发送上限：超过就当界面卡住，放弃这一条（内核那边还有自己的超时）
 SEND_TIMEOUT_SECONDS = 20.0
+WARMUP_TIMEOUT_SECONDS = 25.0
+
+
+def _runtime_python() -> str:
+    """跑在哪个解释器里：子进程发送要用同一个（便携 Python 里才装了 wechatauto）。"""
+    return sys.executable or "python"
+
+
+def _run_isolated(payload: Dict[str, Any], timeout_seconds: float) -> Dict[str, Any]:
+    """把界面操作丢到一个子进程里做，超时就杀掉。
+
+    为什么要子进程：uiautomation / WinRT 的调用会卡在 C 层并占着 GIL，主线程里的
+    「看门狗」根本抢不到 CPU 去回话，表现就是整条通道一起卡死（连巡检都停）。
+    子进程被杀掉时，Python 层的一切都会跟着结束，主进程只损失这一次发送。
+    """
+    script = os.path.abspath(__file__)
+    try:
+        completed = subprocess.run(
+            [_runtime_python(), script, "--isolated", json.dumps(payload, ensure_ascii=False)],
+            timeout=max(5.0, float(timeout_seconds)),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "微信界面 %.0f 秒没响应，已强制结束这次操作（后面的消息不受影响）" % timeout_seconds}
+    except Exception as error:  # noqa: BLE001
+        return {"ok": False, "error": "拉起发送进程失败：%s" % error}
+
+    for line in reversed((completed.stdout or "").strip().splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            parsed = json.loads(line)
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(parsed, dict) and "ok" in parsed:
+            return parsed
+    tail = (completed.stderr or completed.stdout or "").strip().splitlines()
+    return {"ok": False, "error": (tail[-1] if tail else "发送进程没有返回结果")[:400]}
 
 
 def method_send(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -730,107 +772,140 @@ def method_send(params: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": "不发送空文本"}
     raw = str(params.get("chatUsername") or STATE.chat_username or CHAT_DEFAULT)
     requested_title = str(params.get("chatTitle") or "").strip()
-    gui = get_gui()
-    if gui is None:
-        return {"ok": False, "error": f"发消息模块不可用：{STATE.gui_error or '界面驱动未就绪'}"}
-
     with STATE.lock:
         username = normalize_username(raw)
         configured = normalize_username(str(STATE.chat_username or ""))
-    # 界面里认的是**会话显示名**（备注/昵称），不是 wxid。传显示名才能命中上游
-    # 的「当前会话就是目标」快路径；传 wxid 每发一条都要重新搜索会话。
-    #
-    # 注意：这里绝对不能用 STATE.chat_title 兜底。那是「白名单会话」的标题，
-    # 当回复目标是别的会话（比如某个群）时，用它会把消息发到白名单那一边去。
+
+    # 界面里认的是会话显示名；传 wxid 每发一条都要重新搜会话。
+    # 但白名单会话的标题绝不能拿来兜底别的目标——那会把群消息发到白名单那个人。
     title = requested_title or resolve_chat_title(username) or ""
     if username and configured and username == configured and not title:
         title = STATE.chat_title or ""
-    targets = [value for value in [title, username] if value] if title else [username]
 
-    # 群聊一律回读确认：群名是拼出来的，搜错会话的话水印回读能立刻发现，
-    # 宁可报「没发出去」也不能把话发到另一个会话里。
-    verify = bool(params.get("verify")) or username.endswith("@chatroom")
+    payload: Dict[str, Any] = {
+        "action": "send",
+        "text": text,
+        "username": username,
+        "title": title,
+        "verify": bool(params.get("verify")),
+    }
+    # 只在一种目标上试一次：以前失败后会换另一种写法重试，结果是「已经发出去了、
+    # 但回读没确认上」时又发一遍，群里看到的就是同一条消息出现两次。
+    result = _run_isolated(payload, SEND_TIMEOUT_SECONDS)
+    if result.get("ok"):
+        return {
+            "ok": True,
+            "chatUsername": username,
+            "chatTitle": title,
+            "detail": str(result.get("detail") or "")[:500],
+        }
+    try:
+        with STATE.lock:
+            STATE.gui = None
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "ok": False,
+        "chatUsername": username,
+        "chatTitle": title,
+        "error": str(result.get("error") or "发送失败")[:500],
+    }
 
-    def attempt(target: Optional[str]) -> Any:
+
+def isolated_warmup(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """子进程里只做一件事：把目标会话打开（后面发消息就只剩粘贴 + 回车）。"""
+    username = str(payload.get("username") or "")
+    title = str(payload.get("title") or "")
+    target = title or username
+    if not target:
+        return {"ok": False, "error": "没给预热目标"}
+    try:
+        import wechatauto.guia as gui_module  # type: ignore
+
+        gui = gui_module.WeChatGUI()
+        gui.open_chat(target)
+        return {"ok": True, "detail": "已打开 %s" % target}
+    except BaseException as error:  # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(error).__name__, error)}
+
+
+def _restore_window(gui: Any) -> None:
+    """微信窗口可能被最小化或缩到屏幕外，这时界面驱动会一直等（一发送就卡）。
+
+    发送前先把它恢复成普通窗口并拉到前台；失败就算了，不因此阻断发送。
+    """
+    try:
+        import win32con  # type: ignore
+        import win32gui  # type: ignore
+
+        hwnd = int(getattr(gui, "hwnd", 0) or 0)
+        if hwnd <= 0:
+            return
+        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        offscreen = left <= -16000 or top <= -16000 or right - left < 200 or bottom - top < 200
+        if win32gui.IsIconic(hwnd) or offscreen:
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            time.sleep(0.6)
+        win32gui.SetForegroundWindow(hwnd)
+        time.sleep(0.2)
+    except Exception:  # noqa: BLE001
+        return
+
+
+def isolated_send(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """子进程里真正干活的那一半：恢复窗口、打开会话、粘贴、回车。"""
+    text = str(payload.get("text") or "")
+    title = str(payload.get("title") or "")
+    username = str(payload.get("username") or "")
+    if not text:
+        return {"ok": False, "error": "不发送空文本"}
+    import wechatauto.guia as gui_module  # type: ignore
+
+    gui = gui_module.WeChatGUI()
+    _restore_window(gui)
+    target = title or username or None
+    opened = False
+    try:
         if target:
-            return gui.send_msg(text, who=target, verify=verify)
-        return gui.send_msg(text, verify=verify)
-
-    def call_with_watchdog(target, timeout_seconds):
-        """界面驱动有时会卡死（找会话、OCR、等输入框）。卡住时整个旁路进程都动不了，
-        连巡检都停了，表现就是「群聊说完私聊就不回了」。给每次发送套一个看门狗：
-        超时就放弃这一条、把界面实例丢掉重建，别拖死后面的消息。"""
-        box = {}
-
-        def runner():
             try:
-                box["value"] = attempt(target)
-            except BaseException as error:  # noqa: BLE001
-                box["error"] = error
-
-        worker = threading.Thread(target=runner, daemon=True)
-        worker.start()
-        worker.join(timeout_seconds)
-        if worker.is_alive():
-            raise TimeoutError("界面发送超过 %d 秒没返回" % int(timeout_seconds))
-        if "error" in box:
-            raise box["error"]
-        return box.get("value")
-
-    last_error = None
-    for target in targets or [None]:
-        try:
-            response = call_with_watchdog(target, SEND_TIMEOUT_SECONDS)
-        except TimeoutError as error:
-            last_error = str(error)
-            try:
-                with STATE.lock:
-                    STATE.gui = None
+                gui.open_chat(target)
+                opened = True
             except Exception:  # noqa: BLE001
-                pass
-            continue
-        except Exception as error:  # noqa: BLE001
-            last_error = "%s: %s" % (type(error).__name__, error)
-            continue
+                opened = False
+        # 刻意不要求上游「数据库回读确认」：它会等 8 秒，然后回一个「消息已操作发送，
+        # 但数据库未确认」的失败。把它当失败去重试，就会同一条消息发两遍。
+        #
+        # 已经 open_chat 过就不要再把 who 传给 send_msg：上游会拿 who 再搜一次会话，
+        # 界面上能看到「搜索白名单用户」这个动作做两遍。
+        if opened:
+            response = gui.send_msg(text, verify=False)
+        elif target:
+            response = gui.send_msg(text, who=target, verify=False)
+        else:
+            response = gui.send_msg(text, verify=False)
+    except BaseException as error:  # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(error).__name__, error)}
+    detail = str(response)[:500]
+    ok = True
+    for attribute in ("success", "ok", "sent"):
+        value = getattr(response, attribute, None)
+        if isinstance(value, bool):
+            ok = value
+            break
+    if not ok and ("已操作发送" in detail or "已发送" in detail or "成功" in detail):
+        # 上游已经动了键盘、只是回读没确认上：算发出去，别重发
         ok = True
-        for attribute in ("success", "ok", "sent"):
-            value = getattr(response, attribute, None)
-            if isinstance(value, bool):
-                ok = value
-                break
-        detail = str(response)[:500]
-        if ok:
-            return {
-                "ok": True,
-                "chatUsername": username,
-                "chatTitle": title,
-                "detail": detail,
-            }
-        last_error = detail
-        # 没发成功就换下一个目标写法再试一次（显示名加载失败时会退到 wxid）
-    return {"ok": False, "chatUsername": username, "chatTitle": title, "error": last_error or "发送失败"}
+    return {"ok": bool(ok), "detail": detail, "error": None if ok else detail}
 
 
 def method_warmup(params: Dict[str, Any]) -> Dict[str, Any]:
-    """预热：把目标会话先打开。
-
-    不预热的话，用户发第一条消息后要等界面驱动找窗口 + 搜会话，十几秒才回；
-    提前打开一次，后面只是粘贴 + 回车。
-    """
-    gui = get_gui()
-    if gui is None:
-        return {"ok": False, "error": STATE.gui_error or "界面驱动未就绪"}
+    """预热：把目标会话先打开（同样丢子进程，卡住也不拖累主进程）。"""
+    raw = str(params.get("chatUsername") or STATE.chat_username or CHAT_DEFAULT)
     with STATE.lock:
-        target = STATE.chat_title or STATE.chat_username
-    if not target:
-        return {"ok": False, "error": "还没有设置会话"}
-    try:
-        opened = bool(gui.open_chat(target))
-    except Exception as error:  # noqa: BLE001
-        return {"ok": False, "target": target, "error": f"{type(error).__name__}: {error}"}
-    log(f"会话预热：{target} → {'已打开' if opened else '没打开'}")
-    return {"ok": opened, "target": target}
-
+        username = normalize_username(raw)
+    title = resolve_chat_title(username) or ""
+    result = _run_isolated({"action": "warmup", "username": username, "title": title}, WARMUP_TIMEOUT_SECONDS)
+    return {"ok": bool(result.get("ok")), "chatUsername": username, "chatTitle": title, "error": result.get("error")}
 
 def method_doctor(params: Dict[str, Any]) -> Dict[str, Any]:
     action = str(params.get("action") or "diagnose-keys")
@@ -919,7 +994,39 @@ def handle(line: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Anteros 内置微信通道 sidecar")
     parser.add_argument("--self-test", action="store_true", help="打印一次体检结果就退出（调试用）")
+    parser.add_argument(
+        "--isolated",
+        metavar="PAYLOAD",
+        default=None,
+        help="内部用：只做一次界面操作（send / warmup），做完打印一行 JSON 就退出",
+    )
+    parser.add_argument(
+        "--isolated-file",
+        metavar="PATH",
+        default=None,
+        help="同 --isolated，但载荷从文件读（命令行转义容易把引号吃掉）",
+    )
     args = parser.parse_args()
+
+    # 子进程模式：父进程把界面操作丢到这里，超时就直接被杀掉，主进程不受影响
+    if args.isolated or args.isolated_file:
+        try:
+            try:
+                sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                pass
+            payload_text = args.isolated
+            if args.isolated_file:
+                with open(args.isolated_file, "r", encoding="utf-8") as handle:
+                    payload_text = handle.read()
+            payload = json.loads(payload_text or "{}")
+            action = str(payload.get("action") or "send")
+            result = isolated_warmup(payload) if action == "warmup" else isolated_send(payload)
+            print(json.dumps(result, ensure_ascii=False))
+        except BaseException as error:  # noqa: BLE001
+            print(json.dumps({"ok": False, "error": "%s: %s" % (type(error).__name__, error)}, ensure_ascii=False))
+        return
+
     if args.self_test:
         print(json.dumps(method_health({}), ensure_ascii=False, indent=2))
         return
