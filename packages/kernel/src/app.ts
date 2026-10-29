@@ -284,14 +284,21 @@ export class App {
         });
         return result;
       }
-      case "memory.list":
-        return this.memory.list({
+      case "memory.list": {
+        const conversation =
+          typeof p.conversation === "string" && p.conversation.trim() !== "" ? p.conversation : null;
+        const listed = this.memory.list({
           agentId: this.deps.agentId,
-          kind: p.kind,
+          kind: conversation === null ? p.kind : "episodic",
           importance: p.importance,
-          limit: Math.min(Number(p.limit ?? 50), 200),
-          offset: Number(p.offset ?? 0),
+          limit: conversation === null ? Math.min(Number(p.limit ?? 50), 200) : 200,
+          offset: conversation === null ? Number(p.offset ?? 0) : 0,
         });
+        if (conversation === null) return listed;
+        // 指定对话线时只留这条线上的情节记忆（app 主会话 → channelId "app"）
+        const items = listed.items.filter((item) => (item.channelId ?? "app") === conversation);
+        return { ...listed, items, total: items.length };
+      }
       case "memory.get":
         return { item: this.memory.get(this.deps.agentId, Number(p.id)) };
       case "memory.delete":

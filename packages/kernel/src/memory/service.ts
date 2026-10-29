@@ -103,6 +103,7 @@ export class MemoryService implements MemoryPort {
       now: query.now,
       mood: query.mood,
       traits,
+      channelId: query.channelId,
       topK: query.topK,
     });
 
@@ -137,6 +138,7 @@ export class MemoryService implements MemoryPort {
       emotion: input.emotion,
       source: input.source ?? "user_said",
       sourceRef: input.sourceRef,
+      channelId: input.channelId,
       layer: input.layer ?? "detail",
       confidence: input.confidence,
     });
@@ -144,6 +146,7 @@ export class MemoryService implements MemoryPort {
 
   private insertEpisode(input: {
     agentId: number;
+    channelId?: string;
     text: string;
     now: number;
     importance: Importance;
@@ -156,6 +159,7 @@ export class MemoryService implements MemoryPort {
   }): number {
     return insertEpisodic(this.db, {
       agentId: input.agentId,
+      channelId: input.channelId,
       tStartTs: input.now,
       tEndTs: input.now,
       text: input.text,
@@ -258,7 +262,12 @@ export class MemoryService implements MemoryPort {
 
   /* ───────────────────── 抽取：规则 → 插件 → LLM ───────────────────── */
 
-  async extract(agentId: number, texts: Array<{ id: number; text: string; ts: number }>, now: number): Promise<number> {
+  async extract(
+    agentId: number,
+    texts: Array<{ id: number; text: string; ts: number }>,
+    now: number,
+    channelId?: string,
+  ): Promise<number> {
     let written = 0;
     for (const item of texts) {
       const trimmed = item.text.trim();
@@ -293,13 +302,20 @@ export class MemoryService implements MemoryPort {
       }
 
       const merged = mergeExtractions([rules, plugin, viaLlm]);
-      written += this.persistExtraction(agentId, item.id, trimmed, item.ts, merged);
+      written += this.persistExtraction(agentId, item.id, trimmed, item.ts, merged, channelId);
     }
     return written;
   }
 
   /** 落库（去重后）：episodic / semantic / open_loop 三类；persona 一律拒绝。 */
-  private persistExtraction(agentId: number, messageId: number, text: string, ts: number, merged: RuleExtraction): number {
+  private persistExtraction(
+    agentId: number,
+    messageId: number,
+    text: string,
+    ts: number,
+    merged: RuleExtraction,
+    channelId?: string,
+  ): number {
     let written = 0;
     this.db.tx(() => {
       for (const candidate of merged.candidates) {
@@ -337,6 +353,7 @@ export class MemoryService implements MemoryPort {
 
         this.insertEpisode({
           agentId,
+          channelId,
           text: candidate.text,
           now: ts,
           importance: candidate.importance,
@@ -429,6 +446,8 @@ export class MemoryService implements MemoryPort {
     if (rebuilt.text === row.text) return;
     this.insertEpisode({
       agentId,
+      // 重构出来的记忆必须留在原来的对话线上，否则群里的记忆会渗透到私聊
+      channelId: row.channel_id,
       text: rebuilt.text,
       now,
       importance: row.importance,

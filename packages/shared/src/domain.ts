@@ -211,6 +211,8 @@ export interface MemoryItem {
   createdAt: number;
   lastAccessTs: number | null;
   accessCount: number;
+  /** 这条记忆挂在哪条对话线上（app / wechat:xxx）：记忆按人分开，不串味 */
+  channelId?: string;
   /** ACT-R 当前激活值（仅检索结果填充） */
   activation?: number;
   /** 想起概率（仅检索结果填充） */

@@ -52,6 +52,8 @@ export interface RecallQuery {
   /** 情绪一致性加权用的当前情绪 */
   mood?: { v: number; a: number };
   topK?: number;
+  /** 只召回这条对话线上的记忆；不传等于 app 主会话 */
+  channelId?: string;
 }
 
 export interface MindPort {
@@ -95,6 +97,8 @@ export interface MemoryPort {
   recall(query: RecallQuery): MemorySearchResult;
   rememberEpisode(input: {
     agentId: number;
+    /** 记忆挂在哪条对话线上（默认 app 主会话）：不同的人/群分开记 */
+    channelId?: string;
     text: string;
     now: number;
     importance?: Importance;
@@ -119,7 +123,12 @@ export interface MemoryPort {
   touchOpenLoops(agentId: number, now: number): number;
 
   /** 抽取管线：规则 → （可选插件）→ 内联 LLM；返回落库条数 */
-  extract(agentId: number, texts: Array<{ id: number; text: string; ts: number }>, now: number): Promise<number>;
+  extract(
+    agentId: number,
+    texts: Array<{ id: number; text: string; ts: number }>,
+    now: number,
+    channelId?: string,
+  ): Promise<number>;
 
   list(input: { agentId: number; kind?: MemoryKind; importance?: Importance; limit: number; offset: number }): { items: MemoryItem[]; total: number };
   get(agentId: number, id: number): MemoryItem | null;

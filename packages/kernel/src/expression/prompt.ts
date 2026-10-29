@@ -290,6 +290,7 @@ export class PromptAssembler {
       text: input.userText,
       now: input.now,
       mood: { v: world.moodValence, a: world.moodArousal },
+      channelId: input.conversation,
       topK: 8,
     });
 

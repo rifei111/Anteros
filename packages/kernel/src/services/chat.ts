@@ -103,7 +103,9 @@ export class ChatService {
       ports.emit("event.drives", ports.mind.tickDrives(now));
 
       // 记忆抽取不阻塞回复：先落用户这一句，回复完再抽取（管线内部决定规则命中的即时写）
-      void ports.memory.extract(deps.agentId, [{ id: created.messageId, text, ts: now }], now).catch(() => undefined);
+      void ports.memory
+      .extract(deps.agentId, [{ id: created.messageId, text, ts: now }], now, conversation)
+      .catch(() => undefined);
 
       this.parts.cost.checkBudget();
       let plan;
@@ -184,7 +186,14 @@ export class ChatService {
       deps.db.run("UPDATE agents SET state_version = state_version + 1 WHERE id = ?", [deps.agentId]);
 
       // 它自己的话也要进记忆（source=it_did）
-      ports.memory.rememberEpisode({ agentId: deps.agentId, text: plan.fullText, now: Date.now(), source: "it_did", sourceRef: created.turnId });
+      ports.memory.rememberEpisode({
+      agentId: deps.agentId,
+      channelId: conversation,
+      text: plan.fullText,
+      now: Date.now(),
+      source: "it_did",
+      sourceRef: created.turnId,
+    });
       const agentRelation = ports.mind.observeAgentTurn(plan.fullText, Date.now());
       this.emitRelation(agentRelation);
       this.parts.deps.log.info(`turn ${created.turnId} delivered: ${plan.fullText.slice(0, 40)}`);

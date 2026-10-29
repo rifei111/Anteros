@@ -15,7 +15,7 @@
  * 3. 单一写入入口：只有 service 层写库，不允许应用层直接 UPDATE。
  */
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const SCHEMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -115,6 +115,7 @@ CREATE TABLE IF NOT EXISTS style_habits (
 CREATE TABLE IF NOT EXISTS memory_episodic (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   agent_id       INTEGER NOT NULL,
+  channel_id     TEXT NOT NULL DEFAULT 'app',
   t_start_ts     INTEGER NOT NULL,
   t_end_ts       INTEGER,
   text           TEXT NOT NULL,
@@ -132,6 +133,8 @@ CREATE TABLE IF NOT EXISTS memory_episodic (
   deleted_ts     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_episodic_agent_access ON memory_episodic (agent_id, last_access_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_episodic_agent_channel
+  ON memory_episodic (agent_id, channel_id, last_access_ts DESC);
 
 CREATE TABLE IF NOT EXISTS memory_semantic (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -17,6 +17,7 @@ import {
 } from "../lib/labels";
 import { useAppState } from "../lib/store";
 import { Bubble } from "./Bubble";
+import { MemoryStrip } from "./MemoryStrip";
 import { Composer } from "./Composer";
 import { GearIcon } from "./Icons";
 
@@ -245,6 +246,8 @@ export function ChatPane() {
           </button>
         </div>
       ) : null}
+
+      <MemoryStrip conversation={state.activeConversation} />
 
       <div className="chat-list" ref={listRef} onScroll={onScroll}>
         {state.hasMoreHistory ? (

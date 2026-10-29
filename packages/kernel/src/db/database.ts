@@ -50,6 +50,27 @@ export class Db {
       if (!columns.has("sender_id")) this.handle.exec("ALTER TABLE messages ADD COLUMN sender_id TEXT");
       this.handle.exec("PRAGMA user_version = 2;");
     }
+    if (current < 3) {
+      // v2 → v3：记忆按对话线（不同的人、不同的群）分开存，别再互相串味。
+      // 表不存在时（比如只建了半张表的老库）跳过，让建表逻辑自己处理，迁移不能因为缺表就炸。
+      const exists = this.get<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_episodic'",
+      );
+      if (exists !== undefined) {
+        const columns = new Set(
+          this.all<{ name: string }>("PRAGMA table_info(memory_episodic)").map((column) => column.name),
+        );
+        if (!columns.has("channel_id")) {
+          this.handle.exec(
+            "ALTER TABLE memory_episodic ADD COLUMN channel_id TEXT NOT NULL DEFAULT 'app'",
+          );
+        }
+        this.handle.exec(
+          "CREATE INDEX IF NOT EXISTS idx_episodic_agent_channel ON memory_episodic (agent_id, channel_id, last_access_ts DESC)",
+        );
+      }
+      this.handle.exec("PRAGMA user_version = 3;");
+    }
   }
 
   get<T>(sql: string, params: SqlParams = []): T | undefined {

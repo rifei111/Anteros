@@ -1,3 +1,4 @@
+import { SCHEMA_VERSION } from "../src/db/schema";
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,7 +21,7 @@ describe("数据库迁移", () => {
     const db = open();
     db.migrate();
     const row = db.get<{ user_version: number }>("PRAGMA user_version");
-    expect(row?.user_version).toBe(2);
+    expect(row?.user_version).toBe(SCHEMA_VERSION);
     db.close();
   });
 

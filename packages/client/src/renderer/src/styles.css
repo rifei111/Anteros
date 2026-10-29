@@ -2929,3 +2929,34 @@ ul {
   color: var(--text-muted, #8a8f98);
   margin: 0 2px 2px;
 }
+
+.memory-strip {
+  margin: 0 16px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-soft);
+  font-size: 12px;
+}
+.memory-strip-empty { padding: 8px 12px; color: var(--text-3); }
+.memory-strip-head {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: none;
+  border: 0;
+  color: var(--text-2);
+  cursor: pointer;
+  font-size: 12px;
+}
+.memory-strip-title { font-weight: 600; }
+.memory-strip-toggle { color: var(--accent); }
+.memory-strip-list {
+  margin: 0;
+  padding: 0 12px 10px 28px;
+  color: var(--text-2);
+  line-height: 1.7;
+}
+.memory-strip-list li { margin: 2px 0; }

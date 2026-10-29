@@ -662,6 +662,24 @@ await call("channels.wechat.setChatMode", { username: "12345@chatroom", mode: "a
     !appHistory.messages.some((message) => String(message.text).includes("群里测试一句")),
     "主会话 " + appHistory.messages.length + " 条",
   );
+
+  /* ---- 记忆也按会话分线：群里的记忆不会出现在私聊的记忆列表里 ---- */
+  const groupMemory = await call("memory.list", { conversation: groupKey, limit: 50 });
+  const appMemory = await call("memory.list", { conversation: "app", limit: 50 });
+  check(
+    "群会话线的记忆里有群里的对话",
+    groupMemory.items.some((item) => String(item.text).includes("群里测试一句")),
+    "群记忆 " + groupMemory.items.length + " 条",
+  );
+  check(
+    "私聊的记忆列表里看不到群里的记忆",
+    !appMemory.items.some((item) => String(item.text).includes("群里测试一句")),
+    "私聊记忆 " + appMemory.items.length + " 条：" + appMemory.items.map((i) => `${i.channelId}|${String(i.text).slice(0, 20)}`).join(" / "),
+  );
+  check(
+    "每条记忆都标着自己属于哪条对话线",
+    groupMemory.items.every((item) => typeof item.channelId === "string"),
+  );
 } catch (error) {
   check("端到端流程", false, error.message);
 } finally {

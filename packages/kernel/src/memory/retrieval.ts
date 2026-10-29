@@ -47,6 +47,8 @@ export interface RecallInput {
   now: number;
   mood?: { v: number; a: number };
   traits: PersonaTraits;
+  /** 只召回这条对话线的记忆（不传等于 app 主会话） */
+  channelId?: string;
   topK?: number;
   recentLimit?: number;
 }
@@ -179,7 +181,13 @@ function scoreOpenLoop(row: OpenLoopRow, input: RecallInput): Scored {
  * 系统兜底注入的证据（草案 1.6）：redline（承诺/禁忌/说过的重要事）+ 未闭合话题
  * + 置信度最高的结构事实。它不强迫模型开口，但模型也"不许否认发生过"。
  */
-export function collectPinned(db: Db, agentId: number, now: number, limit = 10): MemoryItem[] {
+export function collectPinned(
+  db: Db,
+  agentId: number,
+  now: number,
+  limit = 10,
+  channelId?: string,
+): MemoryItem[] {
   const pinned: MemoryItem[] = [];
   const seen = new Set<string>();
   const push = (item: MemoryItem): void => {
@@ -190,7 +198,7 @@ export function collectPinned(db: Db, agentId: number, now: number, limit = 10):
   };
 
   // 1) redline 级情节与事实
-  for (const row of listRecentEpisodic(db, agentId, DEFAULT_RECENT_EPISODIC)) {
+  for (const row of listRecentEpisodic(db, agentId, DEFAULT_RECENT_EPISODIC, channelId)) {
     if (row.importance === "redline") push(episodicToItem(row));
   }
   for (const row of listCurrentSemantic(db, agentId)) {
@@ -223,7 +231,9 @@ export function retrieve(input: RecallInput): RetrievalResult {
   const recentLimit = input.recentLimit ?? DEFAULT_RECENT_EPISODIC;
   const scored: Scored[] = [];
 
-  for (const row of listRecentEpisodic(input.db, input.agentId, recentLimit)) scored.push(scoreEpisodic(row, input));
+  for (const row of listRecentEpisodic(input.db, input.agentId, recentLimit, input.channelId)) {
+    scored.push(scoreEpisodic(row, input));
+  }
   for (const row of listCurrentSemantic(input.db, input.agentId)) scored.push(scoreSemantic(row, input));
   for (const row of listOpenLoops(input.db, input.agentId, true)) scored.push(scoreOpenLoop(row, input));
 

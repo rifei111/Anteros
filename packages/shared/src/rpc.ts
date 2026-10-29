@@ -112,7 +112,7 @@ export interface KernelApi {
 
   "memory.search": MethodSpec<{ query: string; topK?: number }, MemorySearchResult>;
   "memory.list": MethodSpec<
-    { kind?: MemoryKind; importance?: Importance; limit?: number; offset?: number },
+    { kind?: MemoryKind; importance?: Importance; limit?: number; offset?: number; conversation?: string },
     { items: MemoryItem[]; total: number }
   >;
   "memory.get": MethodSpec<{ id: number }, { item: MemoryItem | null }>;

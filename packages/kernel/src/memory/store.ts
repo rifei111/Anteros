@@ -15,6 +15,7 @@ import { parseAccessLog } from "./actr.js";
 export interface EpisodicRow {
   id: number;
   agent_id: number;
+  channel_id: string;
   t_start_ts: number;
   t_end_ts: number | null;
   text: string;
@@ -77,6 +78,8 @@ export interface StyleHabitRow {
 
 export interface InsertEpisodicInput {
   agentId: number;
+  /** 这条记忆属于哪条对话线（默认 app 主会话） */
+  channelId?: string;
   tStartTs: number;
   tEndTs?: number | null;
   text: string;
@@ -141,11 +144,12 @@ function parseEntities(raw: string | null | undefined): string[] {
 export function insertEpisodic(db: Db, input: InsertEpisodicInput): number {
   const result = db.run(
     `INSERT INTO memory_episodic
-       (agent_id, t_start_ts, t_end_ts, text, entities, emotion_v, emotion_a, salience,
+       (agent_id, channel_id, t_start_ts, t_end_ts, text, entities, emotion_v, emotion_a, salience,
         importance, layer, confidence, source, source_ref, access_log, last_access_ts)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       toSql(input.agentId),
+      toSql(input.channelId ?? "app"),
       toSql(input.tStartTs),
       toSql(input.tEndTs ?? null),
       toSql(input.text),
@@ -169,7 +173,19 @@ export function getEpisodicRow(db: Db, id: number): EpisodicRow | undefined {
   return db.get<EpisodicRow>("SELECT * FROM memory_episodic WHERE id = ? AND deleted_ts IS NULL", [id]);
 }
 
-export function listRecentEpisodic(db: Db, agentId: number, limit: number): EpisodicRow[] {
+export function listRecentEpisodic(
+  db: Db,
+  agentId: number,
+  limit: number,
+  channelId?: string,
+): EpisodicRow[] {
+  const scoped = (channelId ?? "").trim();
+  if (scoped.length > 0) {
+    return db.all<EpisodicRow>(
+      "SELECT * FROM memory_episodic WHERE agent_id = ? AND channel_id = ? AND deleted_ts IS NULL ORDER BY t_start_ts DESC, id DESC LIMIT ?",
+      [agentId, scoped, limit],
+    );
+  }
   return db.all<EpisodicRow>(
     "SELECT * FROM memory_episodic WHERE agent_id = ? AND deleted_ts IS NULL ORDER BY t_start_ts DESC, id DESC LIMIT ?",
     [agentId, limit],
@@ -222,6 +238,7 @@ export function episodicToItem(row: EpisodicRow): MemoryItem {
     accessCount: accessLog.length,
   };
   if (row.deleted_ts !== null) item.deletedTs = row.deleted_ts;
+  item.channelId = row.channel_id;
   return item;
 }
 

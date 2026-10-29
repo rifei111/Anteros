@@ -502,3 +502,23 @@ New version 0.6.1 has been downloaded to ...\pending\Anteros-Setup-0.6.1-x64.exe
 
 1. 在群里 @它 说一句话，看回复是否出现在**这个群**里（而不是私聊）。
 2. 切到私聊看历史，确认群里说的话不再出现在私聊里。
+
+## 25. v1.0.4 增补（记忆按对话线隔离）
+
+### 25.1 改了什么
+- `memory_episodic` 增加 `channel_id TEXT NOT NULL DEFAULT 'app'`（schema v3），并建索引 `idx_episodic_agent_channel`。
+- `MemoryPort.recall/rememberEpisode/extract` 全部接受 `channelId`；`chat.ts` 用当前对话线（`app` / `wechat:<username或群>`）写记忆；`prompt.ts` 召回时只取这条线。
+- `reencode()` 生成的记忆继承原条目的 `channel_id`。
+- `memory.list` 接受 `conversation`，只返回这条线上的情节记忆。
+- 客户端新增 `packages/client/src/renderer/src/components/MemoryStrip.tsx`：聊天框上方「它记得关于这条对话的 N 件事」，可展开。
+
+### 25.2 怎么验
+1. `npm test` → 21 文件 119 用例全绿。
+2. `npm run smoke:kernel` → 95 项全过（含记忆分线三项）。
+3. 安装 1.0.4，进入应用内对话：聊天框上方出现记忆条；切到微信/群会话，记忆条内容随之切换。
+4. 在群里说一句话，回到应用内主会话：记忆条里不应出现群里的那句话。
+
+### 25.3 已知边界
+- 记忆分线只覆盖情节记忆（episodic）；结构事实（semantic）与未闭合话题仍是全局的（它们是「关于用户的事」，跨线共享是有意的）。
+- 老记忆统一回填为 `'app'`，升级后无法追溯它当初来自哪个群。
+- 群里的回复目标、群成员昵称依据微信 4.x 本地库，库结构变化时可能要跟着改。
