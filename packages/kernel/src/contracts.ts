@@ -206,6 +206,8 @@ export interface ExpressionPort {
     actionId?: number;
     /** 会话键：不同的人/群各自一条对话线（默认应用内主会话） */
     conversation?: string;
+    /** 允许它自己决定「这次不回」：群聊里不想接就不接 */
+    silenceAllowed?: boolean;
   }): Promise<ReplyPlan>;
   /** 只装配上下文，不调用模型（回放与调试用） */
   assemble(input: {

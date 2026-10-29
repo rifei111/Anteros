@@ -102,6 +102,17 @@ export class ResetService {
       "UPDATE action_queue SET state = 'cancelled' WHERE agent_id = ? AND state IN ('queued', 'quarantined')",
       [agentId],
     );
+    // 记忆清空了，关系和情绪还挂在那儿就是假的：亲密度只会越攒越高。
+    // 所以「清空记忆 / 重置记忆」也把关系退回陌生、把驱动归零，和新装一样重新开始。
+    const resetTs = Date.now();
+    this.db.run(
+      "UPDATE relation_state SET stage = 'stranger', intimacy = 0, trust = 0.5, mode = 'standard', since_ts = ?, last_transition_ts = NULL, transition_log = '[]' WHERE agent_id = ?",
+      [resetTs, agentId],
+    );
+    this.db.run(
+      "UPDATE drives_state SET loneliness = 0, boredom = 0, longing = 0, tension = 0, fatigue = 0, urge_to_share = 0, anxiety = 0, updated_ts = ? WHERE agent_id = ?",
+      [resetTs, agentId],
+    );
     this.removeContents(path.join(this.dataDir, "media"));
     this.log.info(
       `memory reset: memories=${counts.memories} loops=${counts.openLoops} narrative=${counts.narrative} messages=${counts.messages} turns=${counts.turns} actions=${Number(cancelled.changes)} keepChat=${options.keepChat === true}`,

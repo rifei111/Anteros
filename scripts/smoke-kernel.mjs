@@ -634,6 +634,13 @@ await call("channels.wechat.setChatMode", { username: "12345@chatroom", mode: "a
     historyAfterReset.messages.length === 0 && statsAfterReset.total === 0,
     `历史 ${historyAfterReset.messages.length} 条 / 记忆 ${statsAfterReset.total} 条`,
   );
+  // 关系数值也要归零：记忆删了、亲密度还挂着，用户看到的就是「重置了关系还在涨」
+  const relationAfterReset = await call("relation.get", {});
+  check(
+    "重置记忆同时把关系退回陌生人（亲密归零）",
+    relationAfterReset.stage === "stranger" && Number(relationAfterReset.intimacy) === 0,
+    `stage=${relationAfterReset.stage} intimacy=${relationAfterReset.intimacy}`,
+  );
 
   // 再验一次反方向：keepChat=true 时记忆清掉、对话留着（界面上的复选框就是映射到这个开关）
   await call("chat.send", { text: "第二句：我养了只猫叫豆豆。", clientTs: Date.now() });

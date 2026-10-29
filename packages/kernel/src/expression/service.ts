@@ -47,6 +47,7 @@ export class ExpressionService implements ExpressionPort {
     trigger: string;
     now: number;
     conversation?: string;
+    silenceAllowed?: boolean;
   }): Promise<PromptBundle> {
     const assembleInput: AssembleInput = {
       agentId: input.agentId,
@@ -54,6 +55,7 @@ export class ExpressionService implements ExpressionPort {
       trigger: input.trigger,
       now: input.now,
       conversation: input.conversation,
+      silenceAllowed: input.silenceAllowed,
     };
     return this.assembler.assemble(assembleInput);
   }
@@ -66,6 +68,7 @@ export class ExpressionService implements ExpressionPort {
     reason?: string;
     actionId?: number;
     conversation?: string;
+    silenceAllowed?: boolean;
   }): Promise<ReplyPlan> {
     const bundle = await this.assemble({
       agentId: input.agentId,
@@ -73,6 +76,7 @@ export class ExpressionService implements ExpressionPort {
       trigger: input.trigger,
       now: input.now,
       conversation: input.conversation,
+      silenceAllowed: input.silenceAllowed,
     });
     const settings = new SettingsService(this.deps.db);
     const persona = this.mind.getPersona();

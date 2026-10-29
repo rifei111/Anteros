@@ -236,12 +236,12 @@ export interface KernelApi {
     { chats: Array<{ username: string; title: string; kind: "direct" | "group"; added: boolean }> }
   >;
   "channels.wechat.addChat": MethodSpec<
-    { username: string; mode?: "all" | "mention" | "off" },
+    { username: string; mode?: "all" | "mention" | "off" | "auto" },
     WechatChannelStatus
   >;
   "channels.wechat.removeChat": MethodSpec<{ username: string }, WechatChannelStatus>;
   "channels.wechat.setChatMode": MethodSpec<
-    { username: string; mode: "all" | "mention" | "off" },
+    { username: string; mode: "all" | "mention" | "off" | "auto" },
     WechatChannelStatus
   >;
   "channels.wechat.setMaxChats": MethodSpec<{ max: number }, WechatChannelStatus>;

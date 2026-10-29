@@ -155,8 +155,10 @@ export function buildSystemPrompt(input: {
   now: number;
   /** 会话键：不同的人/群各自一条对话线（群聊以 @chatroom 结尾） */
   conversation?: string;
+  /** 允许它自己决定这次不回（群聊「自己决定」模式） */
+  silenceAllowed?: boolean;
 }): string {
-  const { deps, persona, relationStage, mode, world, drives, slots, recall, trigger, reason, now, conversation } = input;
+  const { deps, persona, relationStage, mode, world, drives, slots, recall, trigger, reason, now, conversation, silenceAllowed } = input;
   const sections: string[] = [];
 
   sections.push(
@@ -256,6 +258,27 @@ export function buildSystemPrompt(input: {
         "- 群里别人聊得热闹时，你的话更短，别抢话。",
       ].join("\n"),
     );
+  } else if (typeof conversation === "string" && conversation.length > 0) {
+    // 一对一：应用内主会话与外部私聊都算，让它别把私聊当群聊
+    sections.push(
+      [
+        "【这里是私聊】",
+        "- 只有你和对方两个人，话就是说给他听的，不用客套，也不用解释自己在跟谁说话。",
+        "- 对方问什么就答什么，别把话题往别人身上引。",
+      ].join("\n"),
+    );
+  }
+
+  // 群聊「自己决定」模式：可以不出声。
+  if (silenceAllowed === true) {
+    sections.push(
+      [
+        "【这次回不回，你自己定】",
+        "- 想接就正常回；不想接就只输出 <不回> 这三个字（带尖括号），不要加标点、不要解释、不要输出别的内容。",
+        "- 被点名、被直接问、或者你确实有话想说，就回；只是别人的闲聊、看不懂的刷屏、跟你无关的争吵，可以不回。",
+        "- 判断标准是你自己想不想接，不是礼貌；不回不算失礼。",
+      ].join("\n"),
+    );
   }
 
   return sections.filter((section) => section.length > 0).join("\n\n");
@@ -269,6 +292,7 @@ export interface AssembleInput {
   reason?: string;
   /** 会话键：不同的人/群各自一条对话线（默认应用内主会话） */
   conversation?: string;
+  silenceAllowed?: boolean;
 }
 
 export class PromptAssembler {
@@ -310,6 +334,7 @@ export class PromptAssembler {
       reason: input.reason,
       now: input.now,
       conversation: input.conversation,
+      silenceAllowed: input.silenceAllowed,
     });
 
     return {

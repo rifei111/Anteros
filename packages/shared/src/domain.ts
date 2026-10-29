@@ -498,7 +498,7 @@ export interface WechatChatTarget {
   title: string;
   kind: "direct" | "group";
   /** all = 每条都回；mention = 只在群里 @ 我时回；off = 只看不回 */
-  mode: "all" | "mention" | "off";
+  mode: "all" | "mention" | "off" | "auto";
   inboundCount: number;
   outboundCount: number;
   lastMessageTs: number | null;

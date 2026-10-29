@@ -144,20 +144,36 @@ export class App {
       emit: (method, params) => this.emit(method, params),
       // 收到某个会话的消息：按会话排队，轮到了再走一遍对话编排，分条发回同一个会话。
       // 不直接 await：一条回复要十几秒，阻塞住巡检就收不到下一条了。
-      onInbound: async ({ text, externalId, chatUsername, chatTitle, senderName, senderId }) => {
+      onInbound: async ({ text, externalId, chatUsername, chatTitle, senderName, senderId, decideReply }) => {
         const key = `wechat:${chatUsername}`;
         this.conversationQueue.offer({
           key,
           label: chatTitle || chatUsername,
           run: async () => {
-            await this.chat.send({
+            // 「自己决定回不回」：先把分条攒着，等它写完再决定发不发。
+            // 直接边写边发的话，模型先说了一句「不回」也已经被送出去了。
+            const buffered: string[] = [];
+            const result = await this.chat.send({
               text,
               eventId: `wechat:${externalId}`,
               conversation: key,
               // 群聊：谁说的要落库、也要进上下文
               author: senderName ? { name: senderName, id: senderId ?? null } : undefined,
-              onPart: (part) => this.wechat.send(part, chatUsername),
+              silenceAllowed: decideReply === true,
+              onPart: decideReply === true ? (part) => void buffered.push(part) : (part) => this.wechat.send(part, chatUsername),
             });
+            if (decideReply !== true) return;
+            const joined = buffered.join("").replace(/\s+/g, "");
+            // 只认「<不回>」这一种写法，宁可多发一句也不误吞正常回复
+            if (/^[<＜]?不回[>＞]?$/.test(joined)) {
+              // 决定不回：把这条 turn 落库的气泡删掉，界面上不留「<不回>」这种鬼话
+              this.deps.db.run("DELETE FROM messages WHERE turn_id = ?", [result.turnId]);
+              this.deps.log.info(`[wechat] ${chatTitle || chatUsername}：它决定这次不回`);
+              return;
+            }
+            for (const part of buffered) {
+              await this.wechat.sendAsync(part, chatUsername);
+            }
           },
         });
       },
@@ -307,6 +323,8 @@ export class App {
         this.runtime.permissions.assertOwner("清空记忆");
         this.runtime.permissions.consumeConfirm(p.confirmToken, "memory.deleteAll");
         const deleted = this.memory.deleteAll(this.deps.agentId, Date.now());
+        // 记忆清了，旁路那边攒着的旧消息也不能再翻出来逐条作答
+        this.wechat.resetBacklog();
         this.runtime.audit.log("memory.delete_all", { actorRole: "owner", after: { deleted } });
         return { deleted };
       }
@@ -317,6 +335,8 @@ export class App {
         this.runtime.permissions.consumeConfirm(p.confirmToken, "memory.reset");
         const keepChat = p.keepChat === true;
         const result = this.reset.resetMemory(this.deps.agentId, { keepChat });
+        // 同上：重置后不该出现「它开始一条条回之前的通知」
+        this.wechat.resetBacklog();
         this.runtime.audit.log("memory.reset", { actorRole: "owner", after: { ...result, keepChat } });
         // 重置之后通道状态可能是旧的（设置改动/进程退出），重新对齐一次，别让"发不出去"变成静默
         void this.wechat.refresh().catch((error: unknown) => {

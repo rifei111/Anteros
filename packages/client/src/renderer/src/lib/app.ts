@@ -194,17 +194,34 @@ async function enterChat(): Promise<void> {
   void markReadNow();
 }
 
+/**
+ * 每条对话线各自缓存一份界面消息。
+ * 之前切换会话只留一份 messages，切走再切回来等于从内核重拉一遍；内核慢或者
+ * 刚好在回消息时，界面就先空着，看起来就是「聊天记录会消失」。现在先上缓存、
+ * 后台再对齐，网络/内核抖动也不会把正在看的记录抹掉。
+ */
+const historyCache = new Map<string, ChatMessage[]>();
+
 async function loadHistory(): Promise<void> {
+  const conversation = getState().activeConversation;
   try {
     const result = await invoke("chat.history", {
       limit: HISTORY_PAGE,
-      conversation: getState().activeConversation,
+      conversation,
     });
     const messages = [...result.messages].sort((left, right) => left.ts - right.ts || left.id - right.id);
+    historyCache.set(conversation, messages);
+    // 拉回来的时候用户可能已经切走了：别把 A 的历史盖到 B 的画面上
+    if (getState().activeConversation !== conversation) return;
     setState({ messages, hasMoreHistory: result.hasMore });
   } catch (error) {
     const human = humanizeError(error);
     appendLog({ ts: Date.now(), level: "warn", source: "chat", message: `加载历史失败：${human.title}` });
+    // 失败也不清屏：有缓存就继续显示缓存，别让用户以为记录没了
+    if (getState().activeConversation === conversation && getState().messages.length === 0) {
+      const cached = historyCache.get(conversation);
+      if (cached && cached.length > 0) setState({ messages: cached });
+    }
   }
 }
 
@@ -214,8 +231,12 @@ async function loadHistory(): Promise<void> {
  */
 /** 切换会话（应用内 / 某个微信的人或群）：换一条对话线看历史。 */
 export async function switchConversation(key: string): Promise<void> {
-  if (getState().activeConversation === key) return;
-  setState({ activeConversation: key, messages: [], stream: null, hasMoreHistory: false, unread: 0 });
+  const current = getState().activeConversation;
+  if (current === key) return;
+  // 先把当前这条线的消息存起来，切回去时不必等内核
+  if (getState().messages.length > 0) historyCache.set(current, getState().messages);
+  const cached = historyCache.get(key) ?? [];
+  setState({ activeConversation: key, messages: cached, stream: null, hasMoreHistory: false, unread: 0 });
   await loadHistory();
 }
 
@@ -230,6 +251,7 @@ export async function loadWechatChats(): Promise<void> {
 }
 
 export async function reloadChatView(): Promise<void> {
+  historyCache.clear();
   setState({ messages: [], stream: null, hasMoreHistory: false, unread: 0 });
   await loadHistory();
 }

@@ -49,6 +49,8 @@ export class ChatService {
     onPart?: (text: string, index: number) => void;
     /** 群聊里这句话是谁说的：落库供界面显示，也拼进模型上下文，免得张冠李戴 */
     author?: { name?: string | null; id?: string | null };
+    /** 允许它自己决定这次回不回（群聊「自己决定」模式）：模型可以只回一句「不回」 */
+    silenceAllowed?: boolean;
   }): Promise<ChatReplyResult> {
     const { deps, consent } = this.parts;
     consent.requireConsent("app");
@@ -116,6 +118,7 @@ export class ChatService {
           trigger: "reply",
           now,
           conversation,
+          silenceAllowed: input.silenceAllowed === true,
         });
       } catch (err) {
         deps.db.run("UPDATE turns SET outcome = 'failed' WHERE id = ?", [created.turnId]);

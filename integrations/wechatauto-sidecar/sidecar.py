@@ -607,6 +607,12 @@ def method_poll(params: Dict[str, Any]) -> Dict[str, Any]:
         }
     fallback_since = int(params.get("sinceSeq") or 0)
     limit = max(1, min(500, int(params.get("limit") or 100)))
+    # 内核传进来的「这条时间之前的消息一律不要」：清空记忆/重启后不能把历史
+    # 消息当新消息逐条回复，否则用户会看到它对着旧消息一条条作答。
+    try:
+        skip_before_ts = int(float(params.get("skipBeforeTs") or 0))
+    except (TypeError, ValueError):
+        skip_before_ts = 0
     with STATE.lock:
         default_chat = STATE.chat_username
         default_title = STATE.chat_title
@@ -678,6 +684,13 @@ def method_poll(params: Dict[str, Any]) -> Dict[str, Any]:
         for row in rows:
             seq = int(row.get("sort_seq") or row.get("seq") or 0)
             next_seqs[username] = max(next_seqs[username], seq)
+            if skip_before_ts > 0:
+                try:
+                    created = int(row.get("create_time") or row.get("create_ts") or 0)
+                except (TypeError, ValueError):
+                    created = 0
+                if created > 0 and created < skip_before_ts:
+                    continue
             sender = str(row.get("sender_username") or row.get("sender") or "")
             is_self = bool(self_wxid) and sender == self_wxid
             raw_text = row.get("content") if row.get("content") is not None else row.get("text")
@@ -706,6 +719,10 @@ def method_poll(params: Dict[str, Any]) -> Dict[str, Any]:
     if error:
         result["error"] = error
     return result
+
+# 单条消息的发送上限：超过就当界面卡住，放弃这一条（内核那边还有自己的超时）
+SEND_TIMEOUT_SECONDS = 20.0
+
 
 def method_send(params: Dict[str, Any]) -> Dict[str, Any]:
     text = str(params.get("text") or "").strip()
@@ -739,12 +756,41 @@ def method_send(params: Dict[str, Any]) -> Dict[str, Any]:
             return gui.send_msg(text, who=target, verify=verify)
         return gui.send_msg(text, verify=verify)
 
+    def call_with_watchdog(target, timeout_seconds):
+        """界面驱动有时会卡死（找会话、OCR、等输入框）。卡住时整个旁路进程都动不了，
+        连巡检都停了，表现就是「群聊说完私聊就不回了」。给每次发送套一个看门狗：
+        超时就放弃这一条、把界面实例丢掉重建，别拖死后面的消息。"""
+        box = {}
+
+        def runner():
+            try:
+                box["value"] = attempt(target)
+            except BaseException as error:  # noqa: BLE001
+                box["error"] = error
+
+        worker = threading.Thread(target=runner, daemon=True)
+        worker.start()
+        worker.join(timeout_seconds)
+        if worker.is_alive():
+            raise TimeoutError("界面发送超过 %d 秒没返回" % int(timeout_seconds))
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
+
     last_error = None
     for target in targets or [None]:
         try:
-            response = attempt(target)
+            response = call_with_watchdog(target, SEND_TIMEOUT_SECONDS)
+        except TimeoutError as error:
+            last_error = str(error)
+            try:
+                with STATE.lock:
+                    STATE.gui = None
+            except Exception:  # noqa: BLE001
+                pass
+            continue
         except Exception as error:  # noqa: BLE001
-            last_error = f"{type(error).__name__}: {error}"
+            last_error = "%s: %s" % (type(error).__name__, error)
             continue
         ok = True
         for attribute in ("success", "ok", "sent"):

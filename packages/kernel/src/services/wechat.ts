@@ -27,6 +27,8 @@ import type { PermissionsService } from "./permissions.js";
 
 const DEFAULT_CHAT_USERNAME = "filehelper";
 const POLL_INTERVAL_MS = 1500;
+// 单条消息最多等这么久：界面驱动卡住时宁可报失败，也不要让整条队列堵死
+const SEND_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 20_000;
 const HEALTH_TIMEOUT_MS = 90_000;
 const MAX_LOG_LINES = 200;
@@ -87,6 +89,8 @@ export interface WechatChannelOptions {
     /** 群聊里发言的人（昵称优先，没有就用 wxid）；私聊为空 */
     senderName?: string;
     senderId?: string;
+    /** 这条要不要回，交给它自己判断（会话模式是 auto 时为 true） */
+    decideReply?: boolean;
   }) => Promise<void>;
   /** 把 agent 的一条分条发回微信（第二个参数是会话；不传就发到第一个会话） */
   sendOutbound: (text: string, chatUsername?: string) => void;
@@ -123,6 +127,11 @@ export class WechatChannelService {
   private outboundCount = 0;
   private pollTimer: NodeJS.Timeout | null = null;
   private sinceSeq: number | null = null;
+  /** 这条时间（epoch 秒）之前收到的消息一律不回：清空记忆/重启后不能翻旧账逐条作答 */
+  private backlogCutoffTs = 0;
+  /** 连续发送失败后先冷静一会儿，别把队列堵死 */
+  private sendFailures = 0;
+  private cooldownUntil = 0;
   /** 每个会话各自的水位：群聊和私聊同时盯，不能共用一个 */
   private sinceSeqByChat = new Map<string, number>();
   private deepChecksDone = false;
@@ -269,7 +278,7 @@ export class WechatChannelService {
   }
 
   /** 添加一个可对话对象（受上限约束）。 */
-  async addChat(input: { username: string; title?: string; kind?: "direct" | "group"; mode?: "all" | "mention" | "off" }): Promise<WechatChannelStatus> {
+  async addChat(input: { username: string; title?: string; kind?: "direct" | "group"; mode?: "all" | "mention" | "off" | "auto" }): Promise<WechatChannelStatus> {
     this.permissions.assertOwner("添加微信可对话对象");
     const username = (input.username ?? "").trim();
     if (username.length === 0 || username.length > 160) {
@@ -314,7 +323,7 @@ export class WechatChannelService {
     return this.status();
   }
 
-  async setChatMode(username: string, mode: "all" | "mention" | "off"): Promise<WechatChannelStatus> {
+  async setChatMode(username: string, mode: "all" | "mention" | "off" | "auto"): Promise<WechatChannelStatus> {
     this.permissions.assertOwner("设置微信会话回复策略");
     const value = (username ?? "").trim();
     const chats = this.chats().map((chat) => (chat.username === value ? { ...chat, mode } : chat));
@@ -1089,13 +1098,21 @@ export class WechatChannelService {
       this.running = true;
       this.starting = false;
       this.sinceSeq = null;
+      // 启动这一刻之前的消息都不算「新消息」：否则重启后会把积压的历史当成未读，一条条回复。
+      this.backlogCutoffTs = Math.floor(Date.now() / 1000);
       await this.refresh();
       // 先建基线，避免把历史消息当成"刚收到"
       try {
-        const baseline = (await this.request("poll", { limit: 200 }, REQUEST_TIMEOUT_MS)) as { nextSeq?: number };
+        const baseline = (await this.request(
+          "poll",
+          { limit: 200, skipBeforeTs: this.backlogCutoffTs },
+          REQUEST_TIMEOUT_MS,
+        )) as { nextSeq?: number };
         this.sinceSeq = typeof baseline.nextSeq === "number" ? baseline.nextSeq : 0;
       } catch {
-        this.sinceSeq = 0;
+        // 拿不到基线时**不要**回落到 0：那等于把全部历史当新消息重放。
+        // 保持在 null，靠 skipBeforeTs 把积压挡住。
+        this.sinceSeq = null;
       }
       this.startPolling();
       // 预热：先把目标会话打开。不预热的话，用户第一条消息要等界面驱动找窗口
@@ -1158,6 +1175,18 @@ export class WechatChannelService {
     this.publish();
   }
 
+  /**
+   * 忘掉积压：清空记忆/删聊天记录之后调一次，把「这条时间之前都不回」推到当下。
+   * 不清的话，旁路那边还攒着旧消息，会把它们当新消息重新灌进来，表现就是
+   * 它对着一堆旧通知一条条作答。
+   */
+  resetBacklog(): void {
+    this.backlogCutoffTs = Math.floor(Date.now() / 1000);
+    this.sinceSeq = null;
+    this.sinceSeqByChat.clear();
+    this.deps.log.info("wechat: 已丢弃积压消息（清空记忆后不再翻旧账）");
+  }
+
   private startPolling(): void {
     this.stopPolling();
     const tick = async (): Promise<void> => {
@@ -1195,6 +1224,7 @@ export class WechatChannelService {
       {
         sinceSeq: this.sinceSeq ?? 0,
         limit: 100,
+        skipBeforeTs: this.backlogCutoffTs,
         chats: targets.map((chat) => ({
           username: chat.username,
           title: chat.title,
@@ -1245,6 +1275,8 @@ export class WechatChannelService {
       if (!target) continue;
       // 只看不回：连计数都不动，免得界面上以为它在处理
       if (target.mode === "off") continue;
+      // 「自己决定回不回」：照样进上下文，但允许模型决定这次不出声
+      const decideReply = target.mode === "auto";
       // 群聊默认跟着所有消息回；切成「只在被 @ 时回」的，非 @ 消息就不接
       if (target.kind === "group" && target.mode === "mention" && message.mentioned !== true) continue;
       this.lastInboundTs = Date.now();
@@ -1273,6 +1305,7 @@ export class WechatChannelService {
           mentioned: message.mentioned === true,
           senderName: target.kind === "group" ? senderName || senderId : undefined,
           senderId: target.kind === "group" ? senderId : undefined,
+          decideReply,
         });
       } catch (error) {
         this.deps.log.warn("wechat inbound failed: " + ((error as Error)?.message ?? String(error)));
@@ -1301,9 +1334,25 @@ export class WechatChannelService {
       this.publish();
       return;
     }
+    const blocked = this.sendBlockedReason();
+    if (blocked !== null) {
+      this.pushRecent({
+        direction: "out",
+        chat: target.username,
+        title: target.title,
+        text: value,
+        ok: false,
+        error: blocked,
+      });
+      this.deps.log.warn(`[wechat] 跳过一条外发消息：${blocked}`);
+      this.publish();
+      return;
+    }
     this.sendInFlight += 1;
-    void this.request("send", { text: value, ...this.sendParams(target) }, 60_000)
+    void this.request("send", { text: value, ...this.sendParams(target) }, SEND_TIMEOUT_MS)
       .then(() => {
+        this.sendFailures = 0;
+        this.cooldownUntil = 0;
         this.lastOutboundTs = Date.now();
         this.outboundCount += 1;
         this.pushRecent({
@@ -1329,6 +1378,7 @@ export class WechatChannelService {
           ok: false,
           error: message,
         });
+        this.noteSendFailure();
         this.lastError = `发送失败：${message}`;
         this.deps.log.warn(`[wechat] 发送失败：${message}`);
         this.publish();
@@ -1338,15 +1388,40 @@ export class WechatChannelService {
       });
   }
 
+  /**
+   * 连续失败就先别发：界面驱动卡住时每条都要等满超时，队列会越堵越长，
+   * 表现就是「群聊说完，私聊再跟它说话就没反应」。冷静 30 秒再试。
+   */
+  private sendBlockedReason(): string | null {
+    if (Date.now() < this.cooldownUntil) {
+      const seconds = Math.ceil((this.cooldownUntil - Date.now()) / 1000);
+      return `连续发送失败，先歇 ${seconds} 秒再试`;
+    }
+    return null;
+  }
+
+  private noteSendFailure(): void {
+    this.sendFailures += 1;
+    if (this.sendFailures >= 2) {
+      this.cooldownUntil = Date.now() + 30_000;
+      this.sendFailures = 0;
+      this.lastError = this.lastError ?? "连续发送失败，先歇 30 秒";
+    }
+  }
+
   /** 带结果的发送：给「验证主动消息 → 微信」这类需要如实回报的路径用。 */
   async sendAsync(text: string, chatUsername?: string): Promise<{ ok: boolean; error?: string }> {
     const value = (text ?? "").trim();
     if (value.length === 0) return { ok: false, error: "内容为空" };
     if (!this.running) return { ok: false, error: "微信通道没有运行：先在通道页开启它" };
     const target = this.resolveTarget(chatUsername);
+    const blocked = this.sendBlockedReason();
+    if (blocked !== null) return { ok: false, error: blocked };
     this.sendInFlight += 1;
     try {
-      await this.request("send", { text: value, ...this.sendParams(target) }, 60_000);
+      await this.request("send", { text: value, ...this.sendParams(target) }, SEND_TIMEOUT_MS);
+      this.sendFailures = 0;
+      this.cooldownUntil = 0;
       this.lastOutboundTs = Date.now();
       this.outboundCount += 1;
       this.publish();

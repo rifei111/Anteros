@@ -160,3 +160,59 @@ describe("planReply", () => {
     }
   });
 });
+
+describe("群聊 / 私聊自知与「自己决定回不回」", () => {
+  it("私聊会明说只有两个人；群聊会明说有别人", async () => {
+    const { kernel, expression } = wiring();
+    try {
+      const direct = await expression.assemble({
+        agentId: kernel.deps.agentId,
+        userText: "在干嘛",
+        trigger: "reply",
+        now: NOW,
+        conversation: "app",
+      });
+      expect(direct.system).toContain("【这里是私聊】");
+      expect(direct.system).not.toContain("【这里是群聊】");
+
+      const group = await expression.assemble({
+        agentId: kernel.deps.agentId,
+        userText: "哈哈",
+        trigger: "reply",
+        now: NOW,
+        conversation: "wechat:123@chatroom",
+      });
+      expect(group.system).toContain("【这里是群聊】");
+      expect(group.system).not.toContain("【这里是私聊】");
+    } finally {
+      kernel.close();
+    }
+  });
+
+  it("允许它自己决定时，提示词里给出「只输出 <不回>」的口子；不允许时没有", async () => {
+    const { kernel, expression } = wiring();
+    try {
+      const allowed = await expression.assemble({
+        agentId: kernel.deps.agentId,
+        userText: "别人在聊别的",
+        trigger: "reply",
+        now: NOW,
+        conversation: "wechat:123@chatroom",
+        silenceAllowed: true,
+      });
+      expect(allowed.system).toContain("【这次回不回，你自己定】");
+      expect(allowed.system).toContain("<不回>");
+
+      const denied = await expression.assemble({
+        agentId: kernel.deps.agentId,
+        userText: "在吗",
+        trigger: "reply",
+        now: NOW,
+        conversation: "wechat:123@chatroom",
+      });
+      expect(denied.system).not.toContain("这次回不回");
+    } finally {
+      kernel.close();
+    }
+  });
+});

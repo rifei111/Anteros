@@ -429,6 +429,7 @@ export function WechatChannelPanel() {
                     >
                       <option value="all">都回</option>
                       <option value="mention">只在被 @ 时回</option>
+                      <option value="auto">自己决定回不回</option>
                       <option value="off">只看不回</option>
                     </select>
                     <button className="btn btn-link" onClick={() => void removeChat(chat.username)} disabled={busy !== null}>
