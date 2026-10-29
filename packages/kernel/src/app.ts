@@ -536,9 +536,20 @@ export class App {
       }
       case "channels.wechat.disable":
         return this.wechat.disable();
+      case "channels.wechat.sendTest": {
+        this.runtime.permissions.assertOwner("微信通道发送测试消息");
+        const input = (params ?? {}) as { text?: string; chatUsername?: string };
+        const text =
+          typeof input.text === "string" && input.text.trim().length > 0
+            ? input.text.trim()
+            : "这是一条 Anteros 自检消息：你能在微信里看到这句，就说明发送这条线是通的。";
+        const target = typeof input.chatUsername === "string" ? input.chatUsername : undefined;
+        const result = await this.wechat.sendAsync(text, target);
+        return { ...result, recent: this.wechat.recent(5) };
+      }
       case "channels.wechat.recent": {
-        this.permissions.assertOwner("查看微信通道最近收发");
-        return { items: this.wechat.recent(Number(params?.limit ?? 20)) };
+        this.runtime.permissions.assertOwner("查看微信通道最近收发");
+        return { items: this.wechat.recent(Number((params as { limit?: number } | undefined)?.limit ?? 20)) };
       }
       case "channels.wechat.listChats": {
         const limit = Math.min(Math.max(Number(p.limit ?? 40), 1), 200);

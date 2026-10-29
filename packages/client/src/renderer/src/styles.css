@@ -2897,3 +2897,20 @@ ul {
 .wechat-recent-chat { flex: none; color: var(--text-soft, #666); }
 .wechat-recent-text { flex: 1 1 220px; word-break: break-word; }
 .wechat-recent-error { flex: none; color: #c0392b; }
+/* 通道页：发一条测试消息 */
+.wechat-test-send {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0 6px;
+  align-items: center;
+}
+.wechat-test-send .input {
+  flex: 1;
+  min-width: 0;
+}
+.wechat-test-ok {
+  color: #2f7d32;
+}
+.wechat-test-bad {
+  color: #b3261e;
+}

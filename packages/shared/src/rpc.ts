@@ -199,6 +199,23 @@ export interface KernelApi {
   "channels.wechat.disable": MethodSpec<Record<string, never>, WechatChannelStatus>;
   "channels.wechat.setChat": MethodSpec<{ chatUsername: string }, WechatChannelStatus>;
   /** 列出本机微信里最近的会话与群，供「添加可对话对象」挑选（只读，不发消息） */
+  /** 发一条测试消息：真正走一次 GUI 发送，把成败如实回给界面 */
+  "channels.wechat.sendTest": MethodSpec<
+    { text?: string; chatUsername?: string },
+    {
+      ok: boolean;
+      error?: string;
+      recent: Array<{
+        ts: number;
+        direction: "in" | "out";
+        chat: string;
+        title: string;
+        text: string;
+        ok: boolean;
+        error: string | null;
+      }>;
+    }
+  >;
   /** 最近收发记录：用来验证"它真的读到了/发出去了"，不是只看体检绿灯 */
   "channels.wechat.recent": MethodSpec<
     { limit?: number },

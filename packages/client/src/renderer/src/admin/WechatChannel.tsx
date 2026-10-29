@@ -64,6 +64,9 @@ export function WechatChannelPanel() {
     Array<{ ts: number; direction: "in" | "out"; chat: string; title: string; text: string; ok: boolean; error: string | null }>
   >([]);
   const [recentBusy, setRecentBusy] = useState(false);
+  const [testText, setTestText] = useState("");
+  const [testBusy, setTestBusy] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; error: string | null; elapsedMs: number } | null>(null);
   const [candidates, setCandidates] = useState<Array<{ username: string; title: string; kind: "direct" | "group"; added: boolean }> | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
 
@@ -277,6 +280,23 @@ export function WechatChannelPanel() {
       reportError(error);
     } finally {
       setRecentBusy(false);
+    }
+  };
+
+  /** 真的发一条出去：这是唯一能证明「发送这条线通了」的证据。 */
+  const sendTest = async (): Promise<void> => {
+    setTestBusy(true);
+    setTestResult(null);
+    const started = Date.now();
+    try {
+      const result = await invoke("channels.wechat.sendTest", { text: testText.trim() || undefined });
+      setTestResult({ ok: result.ok, error: result.error ?? null, elapsedMs: Date.now() - started });
+      setRecent(result.recent);
+      applyStatus(await invoke("channels.wechat.status", {}));
+    } catch (error) {
+      setTestResult({ ok: false, error: error instanceof Error ? error.message : String(error), elapsedMs: Date.now() - started });
+    } finally {
+      setTestBusy(false);
     }
   };
 
@@ -589,6 +609,24 @@ export function WechatChannelPanel() {
           </button>
           <span className="muted small">收到了 {recent.filter((item) => item.direction === "in").length} 条，发出 {recent.filter((item) => item.direction === "out" && item.ok).length} 条，失败 {recent.filter((item) => item.direction === "out" && !item.ok).length} 条</span>
         </div>
+        <div className="wechat-test-send">
+          <input
+            className="input"
+            value={testText}
+            onChange={(event) => setTestText(event.target.value)}
+            placeholder="要发的内容（留空就发一句固定的自检话）"
+            disabled={testBusy}
+          />
+          <button className="btn btn-primary" onClick={() => void sendTest()} disabled={testBusy}>
+            {testBusy ? "正在发…" : "发一条测试消息"}
+          </button>
+        </div>
+        {testResult ? (
+          <p className={testResult.ok ? "small wechat-test-ok" : "small wechat-test-bad"}>
+            {testResult.ok ? `发出去了，用时 ${(testResult.elapsedMs / 1000).toFixed(1)} 秒` : `没发出去：${testResult.error ?? "未知原因"}`}
+            {testResult.ok ? "。去微信里看一眼那个对话，有没有这句话。" : ""}
+          </p>
+        ) : null}
         {recent.length > 0 ? (
           <ul className="wechat-recent">
             {recent.map((item, index) => (
