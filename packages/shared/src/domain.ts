@@ -475,7 +475,31 @@ export interface WechatChannelStatus {
   /** 上次体检完成的时间（0 = 还没体检过） */
   lastCheckTs: number;
   /** 主动消息要不要同时发到这个微信会话（默认关：主动消息只在应用里出现） */
+
   relayProactive: boolean;
+  /** 允许对话的对象列表（默认空，开启后按上限逐个添加） */
+  chats: WechatChatTarget[];
+  /** 可对话用户数量上限（1–8） */
+  maxChats: number;
+  /** 当前排队等待回复的消息条数（所有人合计） */
+  queueDepth: number;
+}
+/** 一个「可对话对象」：私聊或群聊，各自独立的回复策略。 */
+export interface WechatChatTarget {
+  /** 上游认的会话 id：私聊是 wxid_xxx，群聊是 xxx@chatroom */
+  username: string;
+  /** 界面上显示的会话名（备注 / 昵称 / 群名） */
+  title: string;
+  kind: "direct" | "group";
+  /** all = 每条都回；mention = 只在群里 @ 我时回；off = 只看不回 */
+  mode: "all" | "mention" | "off";
+  inboundCount: number;
+  outboundCount: number;
+  lastMessageTs: number | null;
+  /** 有人说话但当前上一轮还没答完时，这里会大于 0 */
+  queueDepth: number;
+  /** 最近一条没能处理的原因（比如超过可对话上限） */
+  lastError: string | null;
 }
 export type ActionState = "queued" | "quarantined" | "dispatched" | "cancelled" | "expired";
 

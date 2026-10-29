@@ -27,6 +27,7 @@ import type {
   WorldState,
 } from "@anteros/shared";
 import type { ConnectionInfo } from "./kernel";
+import type { WechatChatTarget } from "@anteros/shared";
 import type { UpdateStatusView } from "../../../common/protocol";
 
 export type Phase = "connecting" | "consent" | "onboarding" | "ready";
@@ -109,6 +110,10 @@ export interface AppState {
   updateStatus: UpdateStatusView | null;
   channels: ChannelInfo[];
   messages: ChatMessage[];
+  /** 当前正在看的会话键：app 或 wechat:<username> */
+  activeConversation: string;
+  /** 微信通道里被设为可对话的对象（切换会话用） */
+  wechatChats: WechatChatTarget[];
   hasMoreHistory: boolean;
   historyLoading: boolean;
   stream: StreamView | null;
@@ -152,6 +157,8 @@ const initialState: AppState = {
   updateStatus: null,
   channels: [],
   messages: [],
+  activeConversation: "app",
+  wechatChats: [],
   hasMoreHistory: false,
   historyLoading: false,
   stream: null,
@@ -205,6 +212,10 @@ export function applyUpdateStatus(status: UpdateStatusView): void {
 }
 
 /** 聊天对象头像：内核快照 / `ui.avatar.set` 返回值都走这里。 */
+export function applyWechatChats(chats: WechatChatTarget[]): void {
+  setState({ wechatChats: chats });
+}
+
 export function applyAgentAvatar(dataUrl: string | null): void {
   setState({ agentAvatar: dataUrl });
 }

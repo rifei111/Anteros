@@ -41,12 +41,19 @@ export class ExpressionService implements ExpressionPort {
     this.anti = new AntiTemplateGuard(deps.db, deps.agentId);
   }
 
-  async assemble(input: { agentId: number; userText: string; trigger: string; now: number }): Promise<PromptBundle> {
+  async assemble(input: {
+    agentId: number;
+    userText: string;
+    trigger: string;
+    now: number;
+    conversation?: string;
+  }): Promise<PromptBundle> {
     const assembleInput: AssembleInput = {
       agentId: input.agentId,
       userText: input.userText,
       trigger: input.trigger,
       now: input.now,
+      conversation: input.conversation,
     };
     return this.assembler.assemble(assembleInput);
   }
@@ -58,8 +65,15 @@ export class ExpressionService implements ExpressionPort {
     now: number;
     reason?: string;
     actionId?: number;
+    conversation?: string;
   }): Promise<ReplyPlan> {
-    const bundle = await this.assemble({ agentId: input.agentId, userText: input.userText, trigger: input.trigger, now: input.now });
+    const bundle = await this.assemble({
+      agentId: input.agentId,
+      userText: input.userText,
+      trigger: input.trigger,
+      now: input.now,
+      conversation: input.conversation,
+    });
     const settings = new SettingsService(this.deps.db);
     const persona = this.mind.getPersona();
     // 多模型：先按任务类别解析；解析不到再看主模型配置

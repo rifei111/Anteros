@@ -579,6 +579,21 @@ try {
   const wechatChat = await call("channels.wechat.setChat", { chatUsername: "filehelper" });
   check("能设置白名单会话", wechatChat.chatUsername === "filehelper");
 
+  /* ---- 第 20 组：多用户 / 群聊（对话对象增删、模式、上限） ---- */
+  const maxed = await call("channels.wechat.setMaxChats", { max: 3 });
+  check("能设可对话用户上限", maxed.maxChats === 3, `maxChats=${maxed.maxChats}`);
+  const addedDirect = await call("channels.wechat.addChat", { username: "wxid_smoke_direct", title: "冒烟私聊" });
+  const directTarget = (addedDirect.chats ?? []).find((item) => item.username === "wxid_smoke_direct");
+  check("加私聊对象默认「都回」", directTarget?.mode === "all" && directTarget?.kind === "direct");
+  const addedGroup = await call("channels.wechat.addChat", { username: "12345@chatroom", title: "冒烟群" });
+  const groupTarget = (addedGroup.chats ?? []).find((item) => item.username === "12345@chatroom");
+  check("加群默认「只在被 @ 时回」，且识别成 group", groupTarget?.mode === "mention" && groupTarget?.kind === "group");
+  const modeChanged = await call("channels.wechat.setChatMode", { username: "12345@chatroom", mode: "off" });
+  check("能改群的回话模式", (modeChanged.chats ?? []).find((item) => item.username === "12345@chatroom")?.mode === "off");
+  const removed = await call("channels.wechat.removeChat", { username: "wxid_smoke_direct" });
+  check("能移除对话对象", !(removed.chats ?? []).some((item) => item.username === "wxid_smoke_direct"));
+  check("对话对象数量不超上限", (removed.chats ?? []).length <= removed.maxChats, `chats=${(removed.chats ?? []).length}/${removed.maxChats}`);
+
   /* ---- 第 19 组：v0.10.0 的六项改动（头像 / 主动判定 / 通路验证 / 重置记忆） ---- */
   const tinyPng =
     "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";

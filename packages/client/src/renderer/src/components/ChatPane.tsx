@@ -5,6 +5,7 @@ import {
   loadOlderMessages,
   markReadSoon,
   openAdmin,
+  switchConversation,
   resendMessage,
 } from "../lib/app";
 import { formatClock, formatDayLabel, shouldShowTimestamp, truncate } from "../lib/format";
@@ -180,6 +181,23 @@ export function ChatPane() {
             ) : null}
           </div>
         </div>
+        {state.wechatChats.length > 0 ? (
+          <select
+            className="conversation-select"
+            value={state.activeConversation}
+            onChange={(event) => void switchConversation(event.target.value)}
+            aria-label="切换会话"
+            title="切换要看的会话"
+          >
+            <option value="app">应用内</option>
+            {state.wechatChats.map((chat) => (
+              <option key={chat.username} value={`wechat:${chat.username}`}>
+                {chat.kind === "group" ? "群 · " : "微信 · "}
+                {chat.title || chat.username}
+              </option>
+            ))}
+          </select>
+        ) : null}
         <div className="chat-head-actions">
           <button className="icon-btn" onClick={() => openAdmin("owner")} aria-label="管理面板" title="管理面板">
             <GearIcon />

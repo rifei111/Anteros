@@ -2861,3 +2861,24 @@ ul {
 .warn-text {
   color: var(--warn, #b45309);
 }
+/* 聊天页顶部的会话切换器（应用内 / 某个人 / 某个群） */
+.conversation-select {
+  max-width: 190px;
+  margin-right: 6px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+}
+/* 微信面板：对话对象（多用户 / 群聊） */
+.input-narrow { width: 72px; }
+.wechat-candidates { margin: 8px 0; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 8px; }
+.wechat-candidate-row, .wechat-chat-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 0; border-bottom: 1px solid var(--line-soft, var(--line));
+}
+.wechat-candidate-row:last-child, .wechat-chat-row:last-child { border-bottom: none; }
+.wechat-candidate-title, .wechat-chat-title { font-size: 13px; font-weight: 600; }
+.wechat-chat-list { margin-top: 8px; display: flex; flex-direction: column; }

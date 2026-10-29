@@ -1,9 +1,10 @@
-import type { WechatChannelStatus } from "@anteros/shared";
+import type { WechatChannelStatus, WechatChatTarget } from "@anteros/shared";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useConfirm } from "../components/Modal";
 import { invoke } from "../lib/kernel";
 import { formatDateTime } from "../lib/format";
 import { pushToast } from "../lib/store";
+import { loadWechatChats } from "../lib/app";
 import { LoadingLine, Section, reportError, useLoad } from "./helpers";
 
 const RISKS = [
@@ -58,12 +59,18 @@ export function WechatChannelPanel() {
   const [doctorOpen, setDoctorOpen] = useState(false);
   const [doctorText, setDoctorText] = useState("");
   const [localLog, setLocalLog] = useState<string[]>([]);
+  const [maxInput, setMaxInput] = useState("");
+  const [candidates, setCandidates] = useState<Array<{ username: string; title: string; kind: "direct" | "group"; added: boolean }> | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
 
   const status = loaded.data ?? null;
 
   useEffect(() => {
     if (status && chatInput.length === 0) setChatInput(status.chatUsername);
+  }, [status?.chatUsername]);
+
+  useEffect(() => {
+    if (status && maxInput.length === 0) setMaxInput(String(status.maxChats));
   }, [status?.chatUsername]);
 
   // 安装依赖时内核会推 event.wechat.log；这里跟着刷新状态，日志跟着 installLog 走
@@ -94,6 +101,65 @@ export function WechatChannelPanel() {
     [status?.checks],
   );
   const allRiskChecked = riskChecked.every(Boolean);
+
+  const chats = status?.chats ?? [];
+
+  const applyStatus = (next: WechatChannelStatus): void => {
+    loaded.setData(next);
+    setMaxInput(String(next.maxChats));
+    void loadWechatChats();
+  };
+
+  const saveMax = async (): Promise<void> => {
+    const value = Number(maxInput);
+    if (!Number.isFinite(value) || value < 1) {
+      pushToast("warn", "上限要填数字", "1 到 8 之间的整数。");
+      return;
+    }
+    try {
+      applyStatus(await invoke("channels.wechat.setMaxChats", { max: Math.round(value) }));
+      pushToast("success", "上限已保存", `最多同时对话 ${Math.round(value)} 个。`);
+    } catch (error) {
+      reportError(error);
+    }
+  };
+
+  const openCandidates = async (): Promise<void> => {
+    try {
+      const result = await invoke("channels.wechat.listChats", { limit: 60 });
+      setCandidates(result.chats);
+      if (result.chats.length === 0) pushToast("warn", "没读到会话列表", "先把微信打开并登录，再点一次。");
+    } catch (error) {
+      reportError(error);
+    }
+  };
+
+  const addChat = async (username: string): Promise<void> => {
+    try {
+      applyStatus(await invoke("channels.wechat.addChat", { username }));
+      setCandidates((prev) => (prev ? prev.map((item) => (item.username === username ? { ...item, added: true } : item)) : prev));
+      pushToast("success", "已加入对话对象", "它现在会看这个会话，并按照模式回话。");
+    } catch (error) {
+      reportError(error);
+    }
+  };
+
+  const removeChat = async (username: string): Promise<void> => {
+    try {
+      applyStatus(await invoke("channels.wechat.removeChat", { username }));
+      setCandidates((prev) => (prev ? prev.map((item) => (item.username === username ? { ...item, added: false } : item)) : prev));
+    } catch (error) {
+      reportError(error);
+    }
+  };
+
+  const setChatMode = async (username: string, mode: WechatChatTarget["mode"]): Promise<void> => {
+    try {
+      applyStatus(await invoke("channels.wechat.setChatMode", { username, mode }));
+    } catch (error) {
+      reportError(error);
+    }
+  };
 
   const run = async (label: string, action: () => Promise<unknown>): Promise<void> => {
     if (busy) return;
@@ -247,6 +313,93 @@ export function WechatChannelPanel() {
                 <span className="badge badge-muted">
                   收 {status.inboundCount} · 发 {status.outboundCount}
                 </span>
+              )}
+            </div>
+          </div>
+
+          <div className="wechat-block">
+            <div className="wechat-block-title">对话对象（多用户 / 群聊）</div>
+            <p className="muted small">
+              只有这里列出的会话它才会看、才会回。群聊默认只在被 @ 时回，也能设成「看情况自己决定」或「都回」；
+              同一会话里连着来好几条消息会排队按顺序回，不会交叉作答。
+            </p>
+            <div className="row-gap">
+              <span className="muted small">最多同时对话</span>
+              <input
+                className="input input-narrow"
+                type="number"
+                min={1}
+                max={8}
+                value={maxInput}
+                onChange={(event) => setMaxInput(event.target.value)}
+              />
+              <button className="btn btn-ghost" onClick={() => void saveMax()} disabled={busy !== null}>
+                保存上限
+              </button>
+              <button className="btn btn-ghost" onClick={() => void openCandidates()} disabled={busy !== null || !status.running}>
+                从最近会话添加
+              </button>
+              <span className="muted small">
+                {chats.length} / {status.maxChats}
+              </span>
+            </div>
+
+            {candidates ? (
+              <div className="wechat-candidates">
+                <div className="wechat-line">
+                  <strong>最近会话</strong>
+                  <button className="btn btn-link" onClick={() => setCandidates(null)}>
+                    收起
+                  </button>
+                </div>
+                {candidates.length === 0 ? (
+                  <div className="muted small">没读到会话（微信要开着并登录）。</div>
+                ) : (
+                  candidates.map((item) => (
+                    <div className="wechat-candidate-row" key={item.username}>
+                      <span className="wechat-candidate-title">
+                        {item.kind === "group" ? "群 · " : ""}
+                        {item.title || item.username}
+                      </span>
+                      <span className="muted small">{item.username}</span>
+                      <button
+                        className="btn btn-ghost"
+                        disabled={item.added || busy !== null}
+                        onClick={() => void addChat(item.username)}
+                      >
+                        {item.added ? "已添加" : "添加"}
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            ) : null}
+
+            <div className="wechat-chat-list">
+              {chats.length === 0 ? (
+                <div className="muted small">还没有添加对话对象：点「从最近会话添加」挑一个。</div>
+              ) : (
+                chats.map((chat) => (
+                  <div className="wechat-chat-row" key={chat.username}>
+                    <span className="wechat-chat-title">
+                      {chat.kind === "group" ? "群 · " : ""}
+                      {chat.title || chat.username}
+                    </span>
+                    <span className="muted small">{chat.username}</span>
+                    <select
+                      className="conversation-select"
+                      value={chat.mode}
+                      onChange={(event) => void setChatMode(chat.username, event.target.value as WechatChatTarget["mode"])}
+                    >
+                      <option value="all">都回</option>
+                      <option value="mention">只在被 @ 时回</option>
+                      <option value="off">只看不回</option>
+                    </select>
+                    <button className="btn btn-link" onClick={() => void removeChat(chat.username)} disabled={busy !== null}>
+                      移除
+                    </button>
+                  </div>
+                ))
               )}
             </div>
           </div>

@@ -1,6 +1,6 @@
 {
   "name": "@anteros/client",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "type": "module",
   "description": "Anteros Windows 主客户端（Electron）：聊天界面 + 声明闸 + 管理面板。",

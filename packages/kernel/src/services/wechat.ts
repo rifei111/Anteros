@@ -18,7 +18,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { AnterosError, ERROR_CODES } from "@anteros/shared";
-import type { ErrorCode, WechatChannelStatus, WechatCheck } from "@anteros/shared";
+import type { ErrorCode, WechatChannelStatus, WechatChatTarget, WechatCheck } from "@anteros/shared";
 import type { KernelDeps } from "../contracts.js";
 import type { SettingsService } from "../settings.js";
 import type { AuditService } from "./audit.js";
@@ -73,10 +73,20 @@ interface PendingRequest {
 export interface WechatChannelOptions {
   /** 把事件推给客户端（App 的 broadcast） */
   emit: (method: string, params: unknown) => void;
-  /** 收到一条来自白名单会话的文本消息，交给对话编排去回 */
-  onInbound: (message: { text: string; externalId: string }) => Promise<void>;
-  /** 把 agent 的一条分条发回微信 */
-  sendOutbound: (text: string) => void;
+  /**
+   * 收到一条来自白名单会话的文本消息，交给对话编排去回。
+   * chat* 字段让上层知道「这句话是谁说的」——不同的人要各自一条对话线。
+   */
+  onInbound: (message: {
+    text: string;
+    externalId: string;
+    chatUsername: string;
+    chatTitle: string;
+    chatKind: "direct" | "group";
+    mentioned: boolean;
+  }) => Promise<void>;
+  /** 把 agent 的一条分条发回微信（第二个参数是会话；不传就发到第一个会话） */
+  sendOutbound: (text: string, chatUsername?: string) => void;
   /** 本机数据目录（便携 Python 运行环境装在这里的 wechat-runtime/ 下） */
   dataDir: string;
 }
@@ -113,6 +123,10 @@ export class WechatChannelService {
   private deepChecksDone = false;
   /** 旁路进程是单线程的：发消息/预热期间它没法响应 poll，这段时间暂停巡检 */
   private sendInFlight = 0;
+  /** 每个会话的收发计数与最近一条消息时间（状态里要按会话显示） */
+  private perChat = new Map<string, { inbound: number; outbound: number; lastTs: number | null; error: string | null }>();
+  /** 上层注入的队列深度查询：不同会话排队多少条，界面上要看得到 */
+  private queueStats: ((username: string) => { depth: number; lastError: string | null }) | null = null;
 
   constructor(
     private readonly deps: KernelDeps,
@@ -148,7 +162,185 @@ export class WechatChannelService {
       installLog: this.installLog.slice(-MAX_LOG_LINES),
       lastCheckTs: this.settings.getJson<number>("wechat.lastCheckTs", 0),
       relayProactive: this.settings.getJson<boolean>("wechat.relayProactive", false) === true,
+      chats: this.chatsView(),
+      maxChats: this.maxChats(),
+      queueDepth: this.chatsView().reduce((sum, chat) => sum + chat.queueDepth, 0),
     };
+  }
+
+  /** 上层（App）在队列建好之后注入，用来把「排队几条」显示到界面上。 */
+  setQueueStats(provider: (username: string) => { depth: number; lastError: string | null }): void {
+    this.queueStats = provider;
+  }
+
+  /**
+   * 可对话对象列表。新版存在 wechat.chats（JSON 数组），老数据只有一个
+   * wechat.chatUsername —— 那里补一条，升级上来的用户不会突然变成"没有会话"。
+   */
+  chats(): WechatChatTarget[] {
+    const stored = this.settings.getJson<unknown>("wechat.chats", null);
+    const list: WechatChatTarget[] = Array.isArray(stored)
+      ? (stored as WechatChatTarget[]).filter((item) => item && typeof item.username === "string" && item.username.length > 0)
+      : [];
+    if (list.length === 0) {
+      const legacy = this.chatUsername();
+      if (legacy.length > 0) {
+        list.push({
+          username: legacy,
+          title: this.chatTitle ?? legacy,
+          kind: "direct",
+          mode: "all",
+          inboundCount: 0,
+          outboundCount: 0,
+          lastMessageTs: null,
+          queueDepth: 0,
+          lastError: null,
+        });
+      }
+    }
+    return list;
+  }
+
+  private chatsView(): WechatChatTarget[] {
+    return this.chats().map((chat) => {
+      const stats = this.perChat.get(chat.username);
+      const queue = this.queueStats?.(chat.username) ?? { depth: 0, lastError: null };
+      return {
+        ...chat,
+        title: chat.title || chat.username,
+        inboundCount: stats?.inbound ?? chat.inboundCount ?? 0,
+        outboundCount: stats?.outbound ?? chat.outboundCount ?? 0,
+        lastMessageTs: stats?.lastTs ?? chat.lastMessageTs ?? null,
+        queueDepth: queue.depth,
+        lastError: queue.lastError ?? stats?.error ?? chat.lastError ?? null,
+      };
+    });
+  }
+
+  maxChats(): number {
+    const value = this.settings.getJson<number>("wechat.maxChats", 1);
+    const parsed = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : 1;
+    return Math.min(Math.max(parsed, 1), 8);
+  }
+
+  private saveChats(chats: WechatChatTarget[]): void {
+    this.settings.setJson(
+      "wechat.chats",
+      chats.map((chat) => ({
+        username: chat.username,
+        title: chat.title,
+        kind: chat.kind,
+        mode: chat.mode,
+        inboundCount: chat.inboundCount,
+        outboundCount: chat.outboundCount,
+        lastMessageTs: chat.lastMessageTs,
+        queueDepth: 0,
+        lastError: null,
+      })),
+    );
+  }
+
+  /** 会话清单变化后告诉旁路进程：它只巡检这几个会话。 */
+  private async pushChatsToSidecar(): Promise<void> {
+    if (!this.running) return;
+    try {
+      await this.request("configure", { chats: this.chats().map((chat) => ({ username: chat.username, title: chat.title, kind: chat.kind })) }, REQUEST_TIMEOUT_MS);
+      this.sinceSeq = null;
+      this.perChat.clear();
+    } catch (error) {
+      this.deps.log.warn(`wechat configure failed: ${(error as Error)?.message ?? String(error)}`);
+    }
+  }
+
+  /** 添加一个可对话对象（受上限约束）。 */
+  async addChat(input: { username: string; title?: string; kind?: "direct" | "group"; mode?: "all" | "mention" | "off" }): Promise<WechatChannelStatus> {
+    this.permissions.assertOwner("添加微信可对话对象");
+    const username = (input.username ?? "").trim();
+    if (username.length === 0 || username.length > 160) {
+      throw new AnterosError(ERROR_CODES.EINVALID, "会话标识不合法（1–160 字符）");
+    }
+    const chats = this.chats().filter((chat) => chat.username !== username);
+    if (chats.length >= this.maxChats()) {
+      throw new AnterosError(
+        ERROR_CODES.EBLOCKED,
+        `已经到可对话用户上限（${this.maxChats()} 个）：先删掉一个，或者把上限调大`,
+        { hint: "上限在通道页的「可对话对象」里改，最多 8 个" },
+      );
+    }
+    const kind = input.kind ?? (username.endsWith("@chatroom") ? "group" : "direct");
+    chats.push({
+      username,
+      title: (input.title ?? "").trim() || username,
+      kind,
+      mode: input.mode ?? (kind === "group" ? "mention" : "all"),
+      inboundCount: 0,
+      outboundCount: 0,
+      lastMessageTs: null,
+      queueDepth: 0,
+      lastError: null,
+    });
+    this.saveChats(chats);
+    await this.pushChatsToSidecar();
+    this.audit.log("wechat.add_chat", { actorRole: "owner", after: { username, kind } });
+    this.publish();
+    return this.status();
+  }
+
+  async removeChat(username: string): Promise<WechatChannelStatus> {
+    this.permissions.assertOwner("删除微信可对话对象");
+    const value = (username ?? "").trim();
+    const chats = this.chats().filter((chat) => chat.username !== value);
+    this.saveChats(chats);
+    this.perChat.delete(value);
+    await this.pushChatsToSidecar();
+    this.audit.log("wechat.remove_chat", { actorRole: "owner", after: { username: value } });
+    this.publish();
+    return this.status();
+  }
+
+  async setChatMode(username: string, mode: "all" | "mention" | "off"): Promise<WechatChannelStatus> {
+    this.permissions.assertOwner("设置微信会话回复策略");
+    const value = (username ?? "").trim();
+    const chats = this.chats().map((chat) => (chat.username === value ? { ...chat, mode } : chat));
+    this.saveChats(chats);
+    await this.pushChatsToSidecar();
+    this.audit.log("wechat.set_chat_mode", { actorRole: "owner", after: { username: value, mode } });
+    this.publish();
+    return this.status();
+  }
+
+  async setMaxChats(max: number): Promise<WechatChannelStatus> {
+    this.permissions.assertOwner("设置可对话用户上限");
+    const value = Math.min(Math.max(Math.floor(Number.isFinite(max) ? max : 1), 1), 8);
+    const chats = this.chats();
+    if (value < chats.length) {
+      throw new AnterosError(ERROR_CODES.EINVALID, `现在有 ${chats.length} 个可对话对象，上限不能设成比它还小`);
+    }
+    this.settings.setJson("wechat.maxChats", value);
+    this.audit.log("wechat.set_max_chats", { actorRole: "owner", after: { max: value } });
+    this.publish();
+    return this.status();
+  }
+
+  /** 旁路进程读本机微信的最近会话与群，给「添加」界面挑人用（只读，不发消息）。 */
+  async listCandidates(limit = 40): Promise<{ chats: Array<{ username: string; title: string; kind: "direct" | "group"; added: boolean }> }> {
+    this.permissions.assertOwner("读取微信最近会话");
+    if (!this.running) {
+      throw new AnterosError(ERROR_CODES.EBLOCKED, "通道没在跑：先开启通道，才能读到微信里的会话");
+    }
+    const result = (await this.request("list-chats", { limit }, 30_000)) as {
+      chats?: Array<{ username?: string; title?: string; kind?: string }>;
+    };
+    const existing = new Set(this.chats().map((chat) => chat.username));
+    const chats = (result.chats ?? [])
+      .filter((item) => typeof item.username === "string" && item.username.length > 0)
+      .map((item) => ({
+        username: String(item.username),
+        title: String(item.title ?? item.username),
+        kind: (item.kind === "group" ? "group" : "direct") as "direct" | "group",
+        added: existing.has(String(item.username)),
+      }));
+    return { chats };
   }
 
   /** 主动消息要不要同时同步到微信（默认关）。 */
@@ -693,6 +885,23 @@ export class WechatChannelService {
     const chatUsername = (input.chatUsername ?? "").trim();
     if (chatUsername.length > 0) {
       this.settings.setJson("wechat.chatUsername", chatUsername);
+      const chats = this.chats();
+      if (!chats.some((chat) => chat.username === chatUsername)) {
+        this.saveChats([
+          ...chats,
+          {
+            username: chatUsername,
+            title: chatUsername,
+            kind: chatUsername.endsWith("@chatroom") ? "group" : "direct",
+            mode: chatUsername.endsWith("@chatroom") ? "mention" : "all",
+            inboundCount: 0,
+            outboundCount: 0,
+            lastMessageTs: null,
+            queueDepth: 0,
+            lastError: null,
+          },
+        ]);
+      }
     }
     this.settings.setJson("wechat.enabled", true);
     this.audit.log("wechat.enable", { actorRole: "owner", after: { chatUsername: this.chatUsername() } });
@@ -711,22 +920,31 @@ export class WechatChannelService {
     return this.status();
   }
 
+  /** 老接口：把某个会话设成唯一的可对话对象（界面上现在用 addChat/removeChat）。 */
   async setChat(chatUsername: string): Promise<WechatChannelStatus> {
     this.permissions.assertOwner("设置微信通道会话");
     const value = (chatUsername ?? "").trim();
-    if (value.length === 0 || value.length > 120) {
-      throw new AnterosError(ERROR_CODES.EINVALID, "会话标识不合法（1–120 字符）");
+    if (value.length === 0 || value.length > 160) {
+      throw new AnterosError(ERROR_CODES.EINVALID, "会话标识不合法（1–160 字符）");
     }
     this.settings.setJson("wechat.chatUsername", value);
-    if (this.running) {
-      try {
-        await this.request("configure", { chatUsername: value }, REQUEST_TIMEOUT_MS);
-        this.sinceSeq = null;
-      } catch (error) {
-        this.deps.log.warn(`wechat configure failed: ${(error as Error)?.message ?? String(error)}`);
-      }
-    }
+    const kind: "direct" | "group" = value.endsWith("@chatroom") ? "group" : "direct";
+    this.saveChats([
+      {
+        username: value,
+        title: this.chatTitle ?? value,
+        kind,
+        mode: kind === "group" ? "mention" : "all",
+        inboundCount: 0,
+        outboundCount: 0,
+        lastMessageTs: null,
+        queueDepth: 0,
+        lastError: null,
+      },
+    ]);
+    await this.pushChatsToSidecar();
     this.audit.log("wechat.set_chat", { actorRole: "owner", after: { chatUsername: value } });
+    this.publish();
     return this.status();
   }
 
@@ -786,6 +1004,7 @@ export class WechatChannelService {
           PYTHONIOENCODING: "utf-8",
           PYTHONUNBUFFERED: "1",
           ANTEROS_WECHAT_CHAT: this.chatUsername(),
+          ANTEROS_WECHAT_CHATS: JSON.stringify(this.chats().map((chat) => chat.username)),
         },
       });
       this.child = child;
@@ -921,7 +1140,17 @@ export class WechatChannelService {
 
   private async pollOnce(): Promise<void> {
     const sinceSeq = this.sinceSeq ?? 0;
-    const result = (await this.request("poll", { sinceSeq, limit: 100 }, REQUEST_TIMEOUT_MS)) as {
+    const targets = this.chats();
+    if (targets.length === 0) return;
+    const result = (await this.request(
+      "poll",
+      {
+        sinceSeq,
+        limit: 100,
+        chats: targets.map((chat) => ({ username: chat.username, title: chat.title, kind: chat.kind })),
+      },
+      REQUEST_TIMEOUT_MS,
+    )) as {
       messages?: Array<{
         seq?: number;
         msgId?: string | null;
@@ -930,6 +1159,7 @@ export class WechatChannelService {
         isSelf?: boolean;
         kind?: string;
         text?: string | null;
+        mentioned?: boolean;
       }>;
       nextSeq?: number;
     };
@@ -942,11 +1172,28 @@ export class WechatChannelService {
       if (kind !== "text" && kind !== "文本") continue;
       const text = (message.text ?? "").trim();
       if (text.length === 0) continue;
+      const chatUsername = String(message.chatUsername ?? "").trim();
+      const target = targets.find((chat) => chat.username === chatUsername) ?? targets[0]!;
+      // 只看不回：连计数都不动，免得界面上以为它在处理
+      if (target.mode === "off") continue;
+      // 群聊默认只在被 @ 时开口；私聊跟人说过的每句都要接
+      if (target.kind === "group" && target.mode === "mention" && message.mentioned !== true) continue;
       this.lastInboundTs = Date.now();
       this.inboundCount += 1;
+      const stats = this.perChat.get(target.username) ?? { inbound: 0, outbound: 0, lastTs: null, error: null };
+      stats.inbound += 1;
+      stats.lastTs = Date.now();
+      this.perChat.set(target.username, stats);
       this.publish();
       try {
-        await this.options.onInbound({ text, externalId: String(message.msgId ?? message.seq ?? Date.now()) });
+        await this.options.onInbound({
+          text,
+          externalId: String(message.msgId ?? message.seq ?? Date.now()),
+          chatUsername: target.username,
+          chatTitle: target.title,
+          chatKind: target.kind,
+          mentioned: message.mentioned === true,
+        });
       } catch (error) {
         this.deps.log.warn(`wechat inbound failed: ${(error as Error)?.message ?? String(error)}`);
       }
@@ -954,9 +1201,10 @@ export class WechatChannelService {
   }
 
   /** agent 的一条分条 → 微信。失败只记日志，不打断对话。 */
-  send(text: string): void {
+  send(text: string, chatUsername?: string): void {
     const value = (text ?? "").trim();
     if (value.length === 0) return;
+    const target = this.resolveTarget(chatUsername);
     if (!this.running) {
       // 别静默丢：通道没在跑的时候，外界看到的现象就是"只在本地回、微信没动"，
       // 所以这里必须留痕，并把原因挂到状态上让界面能显示。
@@ -966,10 +1214,14 @@ export class WechatChannelService {
       return;
     }
     this.sendInFlight += 1;
-    void this.request("send", { text: value, chatUsername: this.chatUsername() }, 60_000)
+    void this.request("send", { text: value, ...this.sendParams(target) }, 60_000)
       .then(() => {
         this.lastOutboundTs = Date.now();
         this.outboundCount += 1;
+        const stats = this.perChat.get(target.username) ?? { inbound: 0, outbound: 0, lastTs: null, error: null };
+        stats.outbound += 1;
+        stats.lastTs = Date.now();
+        this.perChat.set(target.username, stats);
         this.publish();
       })
       .catch((error: unknown) => {
@@ -984,13 +1236,14 @@ export class WechatChannelService {
   }
 
   /** 带结果的发送：给「验证主动消息 → 微信」这类需要如实回报的路径用。 */
-  async sendAsync(text: string): Promise<{ ok: boolean; error?: string }> {
+  async sendAsync(text: string, chatUsername?: string): Promise<{ ok: boolean; error?: string }> {
     const value = (text ?? "").trim();
     if (value.length === 0) return { ok: false, error: "内容为空" };
     if (!this.running) return { ok: false, error: "微信通道没有运行：先在通道页开启它" };
+    const target = this.resolveTarget(chatUsername);
     this.sendInFlight += 1;
     try {
-      await this.request("send", { text: value, chatUsername: this.chatUsername() }, 60_000);
+      await this.request("send", { text: value, ...this.sendParams(target) }, 60_000);
       this.lastOutboundTs = Date.now();
       this.outboundCount += 1;
       this.publish();
@@ -1003,6 +1256,37 @@ export class WechatChannelService {
     } finally {
       this.sendInFlight = Math.max(0, this.sendInFlight - 1);
     }
+  }
+
+  /** 找要发的会话：给了 username 用它，否则用第一个；一个都没有就报错说明白。 */
+  private resolveTarget(chatUsername?: string): WechatChatTarget {
+    const chats = this.chats();
+    const wanted = (chatUsername ?? "").trim();
+    const found = wanted.length > 0 ? chats.find((chat) => chat.username === wanted) : undefined;
+    if (found) return found;
+    const first = chats[0];
+    if (first) return first;
+    return {
+      username: DEFAULT_CHAT_USERNAME,
+      title: DEFAULT_CHAT_USERNAME,
+      kind: "direct",
+      mode: "all",
+      inboundCount: 0,
+      outboundCount: 0,
+      lastMessageTs: null,
+      queueDepth: 0,
+      lastError: null,
+    };
+  }
+
+  private sendParams(target: WechatChatTarget): Record<string, unknown> {
+    return {
+      chatUsername: target.username,
+      chatTitle: target.title,
+      chatKind: target.kind,
+      // 群聊里回话时 @ 一下说话的人，别让整群人以为在跟自己说
+      mention: target.kind === "group",
+    };
   }
 
   private onData(chunk: Buffer): void {

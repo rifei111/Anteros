@@ -153,8 +153,10 @@ export function buildSystemPrompt(input: {
   trigger: string;
   reason?: string;
   now: number;
+  /** 会话键：不同的人/群各自一条对话线（群聊以 @chatroom 结尾） */
+  conversation?: string;
 }): string {
-  const { deps, persona, relationStage, mode, world, drives, slots, recall, trigger, reason, now } = input;
+  const { deps, persona, relationStage, mode, world, drives, slots, recall, trigger, reason, now, conversation } = input;
   const sections: string[] = [];
 
   sections.push(
@@ -243,6 +245,19 @@ export function buildSystemPrompt(input: {
     sections.push(["【这次是回复】", "对方刚说了话。先接住，再回应；不要复述对方原话。"].join("\n"));
   }
 
+  //  群聊不是私聊：一句"哈哈"可能不是跟你说的。
+  if (typeof conversation === "string" && conversation.includes("@chatroom")) {
+    sections.push(
+      [
+        "【这里是群聊】",
+        "- 群里有别人，不是只有你们俩：不要替所有人总结，也不要假设别人知道你们私下的上下文。",
+        "- 只在跟你有关、或者你确实有话说的时候接；不想接就别硬凑，一句短话也行。",
+        "- 别 @ 所有人；群里有人的名字重复时用对方称呼，不要瞎编头衔。",
+        "- 群里别人聊得热闹时，你的话更短，别抢话。",
+      ].join("\n"),
+    );
+  }
+
   return sections.filter((section) => section.length > 0).join("\n\n");
 }
 
@@ -252,6 +267,8 @@ export interface AssembleInput {
   trigger: string;
   now: number;
   reason?: string;
+  /** 会话键：不同的人/群各自一条对话线（默认应用内主会话） */
+  conversation?: string;
 }
 
 export class PromptAssembler {
@@ -291,11 +308,12 @@ export class PromptAssembler {
       trigger: input.trigger,
       reason: input.reason,
       now: input.now,
+      conversation: input.conversation,
     });
 
     return {
       system,
-      messages: this.recentMessages(),
+      messages: this.recentMessages(20, input.conversation ?? "app"),
       evidence: recall.items,
       slots,
       relation,
@@ -305,11 +323,16 @@ export class PromptAssembler {
     };
   }
 
-  /** 最近 20 条对话原文（不概括）。用户当前这句已在库里，会包含在内。 */
-  recentMessages(limit = 20): LlmMessage[] {
+  /**
+   * 最近 20 条对话原文（不概括）。用户当前这句已在库里，会包含在内。
+   *
+   * conversation：不同的人（或群）各有自己的对话线。混在一起装上下文会出现
+   * “把 A 的家事讲给 B 听”，所以按会话过滤；不传就取应用内的主会话。
+   */
+  recentMessages(limit = 20, conversation = "app"): LlmMessage[] {
     const rows = this.deps.db.all<{ role: string; text: string }>(
-      "SELECT role, text FROM messages WHERE agent_id = ? AND role IN ('user','agent') AND recalled = 0 ORDER BY id DESC LIMIT ?",
-      [this.deps.agentId, limit],
+      "SELECT role, text FROM messages WHERE agent_id = ? AND role IN ('user','agent') AND recalled = 0 AND channel_id = ? ORDER BY id DESC LIMIT ?",
+      [this.deps.agentId, conversation, limit],
     );
     return rows
       .reverse()

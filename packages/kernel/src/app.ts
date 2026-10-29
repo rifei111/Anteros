@@ -32,6 +32,7 @@ import { parsePersonaDoc, renderPersonaDoc } from "./expression/persona-doc.js";
 import { PluginService } from "./services/plugins.js";
 import { ChannelService } from "./services/channels.js";
 import { WechatChannelService } from "./services/wechat.js";
+import { ConversationQueue } from "./services/conversations.js";
 import { ExportService } from "./services/export.js";
 import { ResetService } from "./services/reset.js";
 import { SystemService } from "./services/system.js";
@@ -88,6 +89,7 @@ export class App {
   private readonly proactive: ProactiveService;
   private readonly reset: ResetService;
   private readonly wechat: WechatChannelService;
+  private readonly conversationQueue: ConversationQueue;
   private readonly startedTs = Date.now();
   private readonly sessionId: string;
   private emit: Emitter = () => undefined;
@@ -137,19 +139,30 @@ export class App {
         }),
     };
     this.chat = new ChatService({ deps: this.deps, ports, consent: runtime.consent, cost: runtime.cost, audit: runtime.audit });
+    this.conversationQueue = new ConversationQueue(this.deps, runtime.settings);
     this.wechat = new WechatChannelService(this.deps, runtime.settings, runtime.audit, runtime.consent, runtime.permissions, {
       emit: (method, params) => this.emit(method, params),
-      // 收到白名单会话的消息：当成用户说的话走同一套对话编排，agent 的每条分条再转回微信
-      onInbound: async ({ text, externalId }) => {
-        await this.chat.send({
-          text,
-          eventId: `wechat:${externalId}`,
-          onPart: (part) => this.wechat.send(part),
+      // 收到某个会话的消息：按会话排队，轮到了再走一遍对话编排，分条发回同一个会话。
+      // 不直接 await：一条回复要十几秒，阻塞住巡检就收不到下一条了。
+      onInbound: async ({ text, externalId, chatUsername, chatTitle }) => {
+        const key = `wechat:${chatUsername}`;
+        this.conversationQueue.offer({
+          key,
+          label: chatTitle || chatUsername,
+          run: async () => {
+            await this.chat.send({
+              text,
+              eventId: `wechat:${externalId}`,
+              conversation: key,
+              onPart: (part) => this.wechat.send(part, chatUsername),
+            });
+          },
         });
       },
-      sendOutbound: (text) => this.wechat.send(text),
+      sendOutbound: (text, chatUsername) => this.wechat.send(text, chatUsername),
       dataDir: this.runtime.dataDir,
     });
+    this.wechat.setQueueStats((username) => this.conversationQueue.stats(`wechat:${username}`));
     this.proactive = new ProactiveService(this.deps, ports, runtime.consent, runtime.cost, runtime.settings);
     // 主动消息的第二个出口：通道可用且开关打开时才真的发出去（判断逻辑留在通道层）
     this.proactive.setRelay({
@@ -223,11 +236,12 @@ export class App {
             [this.deps.agentId, p.beforeTs],
           )?.id;
         }
+        const conversation = typeof p.conversation === "string" && p.conversation.trim().length > 0 ? p.conversation.trim() : "app";
         const rows = this.deps.db.all<{ id: number }>(
           beforeId
-            ? "SELECT id FROM messages WHERE agent_id = ? AND id < ? ORDER BY id DESC LIMIT ?"
-            : "SELECT id FROM messages WHERE agent_id = ? ORDER BY id DESC LIMIT ?",
-          beforeId ? [this.deps.agentId, beforeId, limit + 1] : [this.deps.agentId, limit + 1],
+            ? "SELECT id FROM messages WHERE agent_id = ? AND channel_id = ? AND id < ? ORDER BY id DESC LIMIT ?"
+            : "SELECT id FROM messages WHERE agent_id = ? AND channel_id = ? ORDER BY id DESC LIMIT ?",
+          beforeId ? [this.deps.agentId, conversation, beforeId, limit + 1] : [this.deps.agentId, conversation, limit + 1],
         );
         const hasMore = rows.length > limit;
         const ids = rows.slice(0, limit).map((row) => row.id).reverse();
@@ -239,6 +253,7 @@ export class App {
           text: String(p.text ?? ""),
           eventId: typeof p.eventId === "string" ? p.eventId : undefined,
           clientTs: typeof p.clientTs === "number" ? p.clientTs : undefined,
+          conversation: typeof p.conversation === "string" ? p.conversation : undefined,
           presence: p.presence,
         });
       case "chat.typing": {
@@ -521,6 +536,26 @@ export class App {
       }
       case "channels.wechat.disable":
         return this.wechat.disable();
+      case "channels.wechat.listChats": {
+        const limit = Math.min(Math.max(Number(p.limit ?? 40), 1), 200);
+        return this.wechat.listCandidates(limit);
+      }
+      case "channels.wechat.addChat": {
+        return this.wechat.addChat({
+          username: String(p.username ?? ""),
+          title: typeof p.title === "string" ? p.title : undefined,
+          kind: p.kind === "group" ? "group" : p.kind === "direct" ? "direct" : undefined,
+          mode: p.mode === "off" || p.mode === "mention" || p.mode === "all" ? p.mode : undefined,
+        });
+      }
+      case "channels.wechat.removeChat":
+        return this.wechat.removeChat(String(p.username ?? ""));
+      case "channels.wechat.setChatMode": {
+        const mode = p.mode === "off" || p.mode === "mention" || p.mode === "all" ? p.mode : "all";
+        return this.wechat.setChatMode(String(p.username ?? ""), mode);
+      }
+      case "channels.wechat.setMaxChats":
+        return this.wechat.setMaxChats(Number(p.max ?? 1));
       case "channels.wechat.setChat": {
         const input = (params ?? {}) as { chatUsername?: unknown };
         return this.wechat.setChat(String(input.chatUsername ?? ""));

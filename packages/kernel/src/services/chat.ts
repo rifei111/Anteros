@@ -42,6 +42,8 @@ export class ChatService {
     text: string;
     eventId?: string;
     clientTs?: number;
+    /** 会话键：不同的人（或群）各自一条对话线，历史与上下文互不污染 */
+    conversation?: string;
     presence?: { isTyping?: boolean; appFocused?: boolean; lastInteractionMs?: number };
     /** 每发出一条分条时回调（内置外部通道用它把话转出去；客户端不用传） */
     onPart?: (text: string, index: number) => void;
@@ -59,6 +61,7 @@ export class ChatService {
       if (previous) return JSON.parse(previous.result) as ChatReplyResult;
     }
 
+    const conversation = (input.conversation ?? "app").trim() || "app";
     return this.serial(async () => {
       const now = Date.now();
       const { ports } = this.parts;
@@ -75,8 +78,8 @@ export class ChatService {
           epoch,
         ]);
         const msg = deps.db.run(
-          "INSERT INTO messages(agent_id, role, text, ts, recalled, channel_id, delivery) VALUES (?, 'user', ?, ?, 0, 'app', 'sent')",
-          [deps.agentId, text, now],
+          "INSERT INTO messages(agent_id, role, text, ts, recalled, channel_id, delivery) VALUES (?, 'user', ?, ?, 0, ?, 'sent')",
+          [deps.agentId, text, now, conversation],
         );
         const turn = deps.db.run("INSERT INTO turns(agent_id, user_msg_id, trigger, created_ts, outcome) VALUES (?, ?, 'reply', ?, 'planning')", [
           deps.agentId,
@@ -99,7 +102,13 @@ export class ChatService {
       this.parts.cost.checkBudget();
       let plan;
       try {
-        plan = await ports.expression.planReply({ agentId: deps.agentId, userText: text, trigger: "reply", now });
+        plan = await ports.expression.planReply({
+          agentId: deps.agentId,
+          userText: text,
+          trigger: "reply",
+          now,
+          conversation,
+        });
       } catch (err) {
         deps.db.run("UPDATE turns SET outcome = 'failed' WHERE id = ?", [created.turnId]);
         throw err;
@@ -125,8 +134,8 @@ export class ChatService {
         if (index === 0) firstTokenTs = Date.now();
         const ts = Date.now();
         const inserted = deps.db.run(
-          "INSERT INTO messages(agent_id, role, text, ts, turn_id, part_index, recalled, channel_id, delivery) VALUES (?, 'agent', ?, ?, ?, ?, 0, 'app', 'sent')",
-          [deps.agentId, part.text, ts, created.turnId, index],
+          "INSERT INTO messages(agent_id, role, text, ts, turn_id, part_index, recalled, channel_id, delivery) VALUES (?, 'agent', ?, ?, ?, ?, 0, ?, 'sent')",
+          [deps.agentId, part.text, ts, created.turnId, index, conversation],
         );
         deliveredTs = ts;
         const message = this.getMessage(inserted.lastInsertRowid);
@@ -187,18 +196,18 @@ export class ChatService {
     });
   }
 
-  history(input: { limit?: number; beforeId?: number } = {}): ChatMessage[] {
+  history(input: { limit?: number; beforeId?: number; conversation?: string } = {}): ChatMessage[] {
     const limit = Math.min(Math.max(input.limit ?? 60, 1), 300);
+    const conversation = (input.conversation ?? "app").trim() || "app";
     const rows = input.beforeId
-      ? this.parts.deps.db.all<MessageRow>("SELECT * FROM messages WHERE agent_id = ? AND id < ? ORDER BY id DESC LIMIT ?", [
-          this.parts.deps.agentId,
-          input.beforeId,
-          limit,
-        ])
-      : this.parts.deps.db.all<MessageRow>("SELECT * FROM messages WHERE agent_id = ? ORDER BY id DESC LIMIT ?", [
-          this.parts.deps.agentId,
-          limit,
-        ]);
+      ? this.parts.deps.db.all<MessageRow>(
+          "SELECT * FROM messages WHERE agent_id = ? AND channel_id = ? AND id < ? ORDER BY id DESC LIMIT ?",
+          [this.parts.deps.agentId, conversation, input.beforeId, limit],
+        )
+      : this.parts.deps.db.all<MessageRow>(
+          "SELECT * FROM messages WHERE agent_id = ? AND channel_id = ? ORDER BY id DESC LIMIT ?",
+          [this.parts.deps.agentId, conversation, limit],
+        );
     return rows.reverse().map(toChatMessage);
   }
 

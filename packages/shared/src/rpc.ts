@@ -91,7 +91,7 @@ export interface KernelApi {
   "state.snapshot": MethodSpec<Record<string, never>, AppSnapshot>;
 
   "chat.history": MethodSpec<
-    { limit?: number; beforeTs?: number },
+    { limit?: number; beforeTs?: number; conversation?: string },
     { messages: ChatMessage[]; hasMore: boolean }
   >;
   /** 上行只带 is_typing 布尔值，禁止上报草稿文本（规范 1 §4.1 隐私约束）。 */
@@ -101,6 +101,8 @@ export interface KernelApi {
       /** 幂等键，内核 7 天内去重（规范 1 §5.1） */
       eventId: string;
       clientTs: number;
+      /** 会话键：不同的人（或群）各自一条对话线，互不污染上下文 */
+      conversation?: string;
       presence?: { isTyping?: boolean; appFocused?: boolean; lastInteractionMs?: number };
     },
     { turnId: number; userMessage: ChatMessage; accepted: boolean }
@@ -196,6 +198,21 @@ export interface KernelApi {
   >;
   "channels.wechat.disable": MethodSpec<Record<string, never>, WechatChannelStatus>;
   "channels.wechat.setChat": MethodSpec<{ chatUsername: string }, WechatChannelStatus>;
+  /** 列出本机微信里最近的会话与群，供「添加可对话对象」挑选（只读，不发消息） */
+  "channels.wechat.listChats": MethodSpec<
+    { limit?: number },
+    { chats: Array<{ username: string; title: string; kind: "direct" | "group"; added: boolean }> }
+  >;
+  "channels.wechat.addChat": MethodSpec<
+    { username: string; mode?: "all" | "mention" | "off" },
+    WechatChannelStatus
+  >;
+  "channels.wechat.removeChat": MethodSpec<{ username: string }, WechatChannelStatus>;
+  "channels.wechat.setChatMode": MethodSpec<
+    { username: string; mode: "all" | "mention" | "off" },
+    WechatChannelStatus
+  >;
+  "channels.wechat.setMaxChats": MethodSpec<{ max: number }, WechatChannelStatus>;
   "channels.wechat.doctor": MethodSpec<{ action: "dump-account" | "diagnose-keys" }, { ok: boolean; output: string }>;
   /** 主动消息要不要同时同步到这个微信会话（默认关） */
   "channels.wechat.setRelay": MethodSpec<{ enabled: boolean }, WechatChannelStatus>;

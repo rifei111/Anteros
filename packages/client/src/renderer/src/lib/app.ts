@@ -12,6 +12,7 @@ import {
   applyModelCatalog,
   applyPluginRuntime,
   applyUpdateStatus,
+  applyWechatChats,
   getState,
   pushToast,
   setState,
@@ -187,14 +188,17 @@ export async function refreshSnapshot(): Promise<void> {
 }
 
 async function enterChat(): Promise<void> {
-  await Promise.all([loadHistory(), loadPresets()]);
+  await Promise.all([loadHistory(), loadPresets(), loadWechatChats()]);
   setState({ phase: "ready", unread: 0 });
   void markReadNow();
 }
 
 async function loadHistory(): Promise<void> {
   try {
-    const result = await invoke("chat.history", { limit: HISTORY_PAGE });
+    const result = await invoke("chat.history", {
+      limit: HISTORY_PAGE,
+      conversation: getState().activeConversation,
+    });
     const messages = [...result.messages].sort((left, right) => left.ts - right.ts || left.id - right.id);
     setState({ messages, hasMoreHistory: result.hasMore });
   } catch (error) {
@@ -207,6 +211,23 @@ async function loadHistory(): Promise<void> {
  * 内核里的对话被清掉之后，把界面上的那一段也清掉再重新拉。
  * 只删库不清界面，画面里还会挂着旧消息，看起来就像"重置没生效"。
  */
+/** 切换会话（应用内 / 某个微信的人或群）：换一条对话线看历史。 */
+export async function switchConversation(key: string): Promise<void> {
+  if (getState().activeConversation === key) return;
+  setState({ activeConversation: key, messages: [], stream: null, hasMoreHistory: false, unread: 0 });
+  await loadHistory();
+}
+
+/** 拉一次「可对话对象」，聊天页顶部的会话切换器用。 */
+export async function loadWechatChats(): Promise<void> {
+  try {
+    const status = await invoke("channels.wechat.status", {});
+    if (Array.isArray(status.chats)) applyWechatChats(status.chats);
+  } catch {
+    // 通道没开就没有会话可切，这里静默
+  }
+}
+
 export async function reloadChatView(): Promise<void> {
   setState({ messages: [], stream: null, hasMoreHistory: false, unread: 0 });
   await loadHistory();

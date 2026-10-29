@@ -195,9 +195,17 @@ export interface ExpressionPort {
     reason?: string;
     /** 主动消息时由 hazard 提供的候选上下文 */
     actionId?: number;
+    /** 会话键：不同的人/群各自一条对话线（默认应用内主会话） */
+    conversation?: string;
   }): Promise<ReplyPlan>;
   /** 只装配上下文，不调用模型（回放与调试用） */
-  assemble(input: { agentId: number; userText: string; trigger: string; now: number }): Promise<PromptBundle>;
+  assemble(input: {
+    agentId: number;
+    userText: string;
+    trigger: string;
+    now: number;
+    conversation?: string;
+  }): Promise<PromptBundle>;
 }
 
 export interface PluginHostPort {

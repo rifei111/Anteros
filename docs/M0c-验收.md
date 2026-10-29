@@ -436,3 +436,21 @@ New version 0.6.1 has been downloaded to ...\pending\Anteros-Setup-0.6.1-x64.exe
 ### 21.4 验证
 - `tsc --noEmit` 全工作区 0 error；`vitest` 18 文件 108 用例全绿；内核冒烟 **83/83**；`package-check` 25 通过。
 - 打包产物实测（`ANTEROS_SMOKE_REPORT` 读面板文本）：人格页出现「人设文档 / 生成当前文档 / 导出为文件 / 从文件读取 / 导入这份文档 / 参数表不会被导入」。
+
+## 22. v0.12.0 增补（多用户与群聊）
+
+### 22.1 新增能力
+- 通道页「对话对象」：从最近会话添加人/群；可设上限 1–8；每个对象单独设模式（都回 / 只在被 @ 时回 / 只看不回）。
+- 消息排队：`packages/kernel/src/services/conversations.ts` 的 `ConversationQueue`——按会话键串行，超上限丢最老的并记录原因（进日志 + 通道状态），不静默丢弃。
+- 群聊识别：`@chatroom` 后缀判为群；群里按 `mentioned` 决定要不要回；回复带被回的人。
+- 群聊上下文：系统提示里加「这里是群聊」一节（别替所有人总结、别假设别人知道私聊上下文、话更短、别 @ 所有人）。
+- 聊天页会话切换器：应用内 / 各微信会话各看各的历史（`chat.history` 按 `conversation` 过滤）。
+
+### 22.2 验证
+- `npx vitest run` → 19 文件 **112 用例全绿**（新增 `packages/kernel/test/conversations.test.ts` 4 例：串行、跨会话并行、超限丢最老、失败不阻塞后续）。
+- `node scripts/smoke-kernel.mjs` → **89 项全过**。
+- `node scripts/check-boundaries.mjs` → 通过（通道名词仍收在通道层，业务代码零命中）。
+- `node scripts/package-check.mjs` → 25 通过 0 警告 0 错误；安装包 `release/Anteros-Setup-0.12.0-x64.exe`。
+
+### 22.3 未验证
+- 真实微信群里的多人发言顺序、@ 判定依赖上游 `mentioned` 字段；本机只做了通道层与队列层的验证，没有真人多群并发压测。
