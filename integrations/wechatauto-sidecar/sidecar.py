@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import threading
@@ -406,6 +407,123 @@ def normalize_kind(raw: Any) -> str:
     return "other"
 
 
+GROUP_PREFIX = re.compile(r"^[A-Za-z0-9_@.\-]{3,64}:\n?")
+
+
+def self_names() -> List[str]:
+    """当前登录账号在群聊里可能被 @ 的名字：昵称 + 备注。"""
+    names: List[str] = []
+    db = load_db()
+    if db is None:
+        return names
+    try:
+        info = db.get_self_info() or {}
+    except Exception:  # noqa: BLE001
+        return names
+    for key in ("nick_name", "remark"):
+        value = str(info.get(key) or "").strip()
+        if value and value not in names:
+            names.append(value)
+    return names
+
+
+def clean_group_text(raw: Any, sender: str) -> str:
+    """剥掉群消息里的 "发送者wxid:\\n" 前缀。"""
+    value = str(raw or "")
+    if sender and value.startswith(f"{sender}:"):
+        value = value[len(sender) + 1 :]
+    match = GROUP_PREFIX.match(value)
+    if match:
+        value = value[match.end() :]
+    return value.strip()
+
+
+def mentioned_me(text_value: str, names: List[str]) -> bool:
+    """群里有没有 @ 我，或 @所有人。"""
+    if not text_value:
+        return False
+    lowered = text_value.lower()
+    for token in ("@所有人", "@all", "@全体成员"):
+        if token.lower() in lowered:
+            return True
+    for name in names:
+        if f"@{name}" in text_value:
+            return True
+    return False
+
+
+def method_list_chats(params: Dict[str, Any]) -> Dict[str, Any]:
+    """最近会话（session.db 的 SessionTable）。内核的"从最近会话添加"用它。"""
+    db = load_db()
+    if db is None:
+        return {"chats": [], "error": STATE.db_error}
+    limit = max(1, min(200, int(params.get("limit") or 40)))
+    try:
+        sessions = db.get_sessions(limit=limit) or []
+    except Exception as error:  # noqa: BLE001
+        return {"chats": [], "error": f"{type(error).__name__}: {error}"}
+    chats: List[Dict[str, Any]] = []
+    for row in sessions:
+        username = str(row.get("username") or "")
+        if not username or username.endswith("@chatroom_placeholder"):
+            continue
+        # 公众号 / 折叠群聊等系统账号用 wxid_ 之外的前缀，这里按需过滤最常见的噪声
+        if username.startswith("gh_") or username == "weixin":
+            continue
+        title = str(row.get("title") or "") or str(row.get("summary") or "") or username
+        chats.append(
+            {
+                "username": username,
+                "title": title,
+                "kind": "group" if username.endswith("@chatroom") else "direct",
+                "unread": int(row.get("unread") or 0),
+                "lastTime": int(row.get("last_time") or 0),
+                "lastSender": str(row.get("last_sender") or ""),
+            }
+        )
+    return {"chats": chats, "self": str(getattr(db, "wxid", "") or "")}
+
+
+def method_inspect(params: Dict[str, Any]) -> Dict[str, Any]:
+    """按会话读最近消息（只读，用于自检"到底读没读到"）。"""
+    db = load_db()
+    if db is None:
+        return {"ok": False, "error": STATE.db_error, "messages": []}
+    raw = str(params.get("chatUsername") or STATE.chat_username or CHAT_DEFAULT)
+    username = normalize_username(raw)
+    limit = max(1, min(100, int(params.get("limit") or 20)))
+    try:
+        rows = db.get_messages(username, limit=limit) or []
+    except Exception as error:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(error).__name__}: {error}", "messages": []}
+    self_wxid = str(getattr(db, "wxid", "") or "")
+    is_group = str(username or "").endswith("@chatroom")
+    names = self_names() if is_group else []
+    messages: List[Dict[str, Any]] = []
+    for row in rows:
+        sender = str(row.get("sender_username") or row.get("sender") or "")
+        content = row.get("content") if row.get("content") is not None else row.get("text")
+        body = clean_group_text(content, sender) if is_group else str(content or "")
+        messages.append(
+            {
+                "chatUsername": username,
+                "senderUsername": sender,
+                "isSelf": bool(self_wxid) and sender == self_wxid,
+                "kind": normalize_kind(row.get("kind") or row.get("type")),
+                "text": body[:400],
+                "mentioned": mentioned_me(body, names) if is_group else False,
+                "createTime": int(row.get("create_time") or 0),
+            }
+        )
+    return {
+        "ok": True,
+        "chatUsername": username,
+        "chatTitle": STATE.chat_title,
+        "self": self_wxid,
+        "messages": messages,
+    }
+
+
 def method_poll(params: Dict[str, Any]) -> Dict[str, Any]:
     db = load_db()
     if db is None:
@@ -429,6 +547,8 @@ def method_poll(params: Dict[str, Any]) -> Dict[str, Any]:
     # 于是它自己发出去的回复又会被当成新消息读回来 → 自己跟自己无限对话。
     # 正确判据：发送者 wxid 等于当前登录账号的 wxid。
     self_wxid = str(getattr(db, "wxid", "") or "")
+    is_group = str(username or "").endswith("@chatroom")
+    names = self_names() if is_group else []
     for row in rows:
         seq = int(row.get("sort_seq") or row.get("seq") or 0)
         next_seq = max(next_seq, seq)
@@ -442,7 +562,19 @@ def method_poll(params: Dict[str, Any]) -> Dict[str, Any]:
                 "senderUsername": sender,
                 "isSelf": is_self,
                 "kind": normalize_kind(row.get("kind") or row.get("type")),
-                "text": row.get("content") if row.get("content") is not None else row.get("text"),
+                "text": (
+                    clean_group_text(row.get("content") if row.get("content") is not None else row.get("text"), sender)
+                    if is_group
+                    else (row.get("content") if row.get("content") is not None else row.get("text"))
+                ),
+                "mentioned": (
+                    mentioned_me(
+                        clean_group_text(row.get("content") if row.get("content") is not None else row.get("text"), sender),
+                        names,
+                    )
+                    if is_group
+                    else False
+                ),
             }
         )
     return {"messages": messages, "nextSeq": next_seq}
@@ -558,6 +690,8 @@ METHODS = {
     "send": method_send,
     "warmup": method_warmup,
     "doctor": method_doctor,
+    "list-chats": method_list_chats,
+    "inspect": method_inspect,
 }
 
 

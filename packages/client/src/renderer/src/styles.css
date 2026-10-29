@@ -2882,3 +2882,18 @@ ul {
 .wechat-candidate-row:last-child, .wechat-chat-row:last-child { border-bottom: none; }
 .wechat-candidate-title, .wechat-chat-title { font-size: 13px; font-weight: 600; }
 .wechat-chat-list { margin-top: 8px; display: flex; flex-direction: column; }
+/* 微信面板：最近收发（证据） */
+.wechat-recent { list-style: none; margin: 8px 0 0; padding: 0; max-height: 260px; overflow: auto; }
+.wechat-recent-item {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  padding: 5px 0; border-bottom: 1px solid var(--line-soft, var(--line));
+  font-size: 12.5px;
+}
+.wechat-recent-item:last-child { border-bottom: none; }
+.wechat-recent-item.bad { background: rgba(220, 60, 60, 0.06); }
+.wechat-recent-dir { font-weight: 600; flex: none; }
+.wechat-recent-dir.in { color: #2f7d4f; }
+.wechat-recent-dir.out { color: #2b5f9e; }
+.wechat-recent-chat { flex: none; color: var(--text-soft, #666); }
+.wechat-recent-text { flex: 1 1 220px; word-break: break-word; }
+.wechat-recent-error { flex: none; color: #c0392b; }

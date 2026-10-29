@@ -128,6 +128,17 @@ export class WechatChannelService {
   /** 上层注入的队列深度查询：不同会话排队多少条，界面上要看得到 */
   private queueStats: ((username: string) => { depth: number; lastError: string | null }) | null = null;
 
+  /** 最近收发记录：只放内存，用来回答"它到底读到了没有/发出去了没有"。 */
+  private recentLog: Array<{
+    ts: number;
+    direction: "in" | "out";
+    chat: string;
+    title: string;
+    text: string;
+    ok: boolean;
+    error: string | null;
+  }> = [];
+
   constructor(
     private readonly deps: KernelDeps,
     private readonly settings: SettingsService,
@@ -354,6 +365,39 @@ export class WechatChannelService {
   /** 事件推送：任何状态变化都推一份全量快照，客户端不用自己拼。 */
   private publish(): void {
     this.options.emit("event.wechat", this.status());
+  }
+
+  private pushRecent(entry: {
+    direction: "in" | "out";
+    chat: string;
+    title: string;
+    text: string;
+    ok: boolean;
+    error?: string | null;
+  }): void {
+    this.recentLog.unshift({
+      ts: Date.now(),
+      direction: entry.direction,
+      chat: entry.chat,
+      title: entry.title,
+      text: entry.text.slice(0, 200),
+      ok: entry.ok,
+      error: entry.error ?? null,
+    });
+    if (this.recentLog.length > 60) this.recentLog.length = 60;
+  }
+
+  /** 最近收发（新的在前）。界面拿它当"证据"用，不靠猜。 */
+  recent(limit = 20): Array<{
+    ts: number;
+    direction: "in" | "out";
+    chat: string;
+    title: string;
+    text: string;
+    ok: boolean;
+    error: string | null;
+  }> {
+    return this.recentLog.slice(0, Math.max(1, Math.min(60, limit)));
   }
 
   private isEnabled(): boolean {
@@ -1208,6 +1252,14 @@ export class WechatChannelService {
     if (!this.running) {
       // 别静默丢：通道没在跑的时候，外界看到的现象就是"只在本地回、微信没动"，
       // 所以这里必须留痕，并把原因挂到状态上让界面能显示。
+      this.pushRecent({
+        direction: "out",
+        chat: target.username,
+        title: target.title,
+        text: value,
+        ok: false,
+        error: "通道没在运行",
+      });
       this.lastError = "消息没发出去：微信通道没在运行（去通道页看一下是关着还是异常）";
       this.deps.log.warn(`[wechat] 丢弃一条外发消息（通道未运行）：${value.slice(0, 24)}`);
       this.publish();
@@ -1218,6 +1270,13 @@ export class WechatChannelService {
       .then(() => {
         this.lastOutboundTs = Date.now();
         this.outboundCount += 1;
+        this.pushRecent({
+          direction: "out",
+          chat: target.username,
+          title: target.title,
+          text: value,
+          ok: true,
+        });
         const stats = this.perChat.get(target.username) ?? { inbound: 0, outbound: 0, lastTs: null, error: null };
         stats.outbound += 1;
         stats.lastTs = Date.now();
@@ -1226,6 +1285,14 @@ export class WechatChannelService {
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
+        this.pushRecent({
+          direction: "out",
+          chat: target.username,
+          title: target.title,
+          text: value,
+          ok: false,
+          error: message,
+        });
         this.lastError = `发送失败：${message}`;
         this.deps.log.warn(`[wechat] 发送失败：${message}`);
         this.publish();

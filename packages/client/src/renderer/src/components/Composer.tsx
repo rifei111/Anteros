@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import type { ChatMessage } from "@anteros/shared";
-import { loadModelCatalog, sendMessage } from "../lib/app";
+import { loadModelCatalog, sendMessage, openAdmin } from "../lib/app";
 import { invoke } from "../lib/kernel";
 import { applyModelCatalog, pushToast, useAppState } from "../lib/store";
 import { truncate } from "../lib/format";
@@ -161,21 +161,24 @@ export function Composer({ quote, onClearQuote }: ComposerProps) {
           <span>逐条发送</span>
         </label>
         <span className="split-hint">开启后你打的每行会分成几条依次发出</span>
-        {models && models.entries.length > 0 ? (
-          <label className="model-pick" title="这次对话用哪个模型；不选就用设置里的主模型">
-            <span>模型</span>
-            <select value={chatModelValue} disabled={sending} onChange={(event) => void selectModel(event.target.value)}>
-              <option value="">主模型（{models.primary.model}）</option>
-              {models.entries
-                .filter((entry) => entry.enabled)
-                .map((entry) => (
-                  <option key={entry.id} value={entry.id}>
-                    {entry.label}（{entry.model}）
-                  </option>
-                ))}
-            </select>
-          </label>
-        ) : null}
+        <label className="model-pick" title="这次对话用哪个模型；不选就用设置里的主模型">
+          <span>模型</span>
+          <select value={chatModelValue} disabled={sending} onChange={(event) => void selectModel(event.target.value)}>
+            <option value="">主模型（{models?.primary.model ?? "还没配"}）</option>
+            {(models?.entries ?? [])
+              .filter((entry) => entry.enabled)
+              .map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {entry.label}（{entry.model}）
+                </option>
+              ))}
+          </select>
+          {(models?.entries.length ?? 0) === 0 ? (
+            <button className="text-btn" type="button" onClick={() => openAdmin("models")}>
+              添加模型
+            </button>
+          ) : null}
+        </label>
       </div>
     </div>
   );

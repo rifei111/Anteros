@@ -60,6 +60,10 @@ export function WechatChannelPanel() {
   const [doctorText, setDoctorText] = useState("");
   const [localLog, setLocalLog] = useState<string[]>([]);
   const [maxInput, setMaxInput] = useState("");
+  const [recent, setRecent] = useState<
+    Array<{ ts: number; direction: "in" | "out"; chat: string; title: string; text: string; ok: boolean; error: string | null }>
+  >([]);
+  const [recentBusy, setRecentBusy] = useState(false);
   const [candidates, setCandidates] = useState<Array<{ username: string; title: string; kind: "direct" | "group"; added: boolean }> | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
 
@@ -261,6 +265,18 @@ export function WechatChannelPanel() {
       pushToast("success", "已复制", "可以直接贴给我看。");
     } catch {
       pushToast("warn", "复制失败", "手动选中文本复制吧。");
+    }
+  };
+
+  const loadRecent = async (): Promise<void> => {
+    setRecentBusy(true);
+    try {
+      const result = await invoke("channels.wechat.recent", { limit: 20 });
+      setRecent(result.items);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setRecentBusy(false);
     }
   };
 
@@ -562,6 +578,32 @@ export function WechatChannelPanel() {
           </p>
         </div>
       ) : null}
+      <div className="wechat-block">
+        <div className="wechat-block-title">它最近读到的 / 发出的</div>
+        <p className="muted small">
+          体检只看进程和数据库通不通；这一块才是"真的读到了没有、发出去了没有"。只存在内存里，重开就清空。
+        </p>
+        <div className="row-gap">
+          <button className="btn btn-ghost" onClick={() => void loadRecent()} disabled={recentBusy}>
+            {recentBusy ? "读取中…" : "看最近 20 条收发"}
+          </button>
+          <span className="muted small">收到了 {recent.filter((item) => item.direction === "in").length} 条，发出 {recent.filter((item) => item.direction === "out" && item.ok).length} 条，失败 {recent.filter((item) => item.direction === "out" && !item.ok).length} 条</span>
+        </div>
+        {recent.length > 0 ? (
+          <ul className="wechat-recent">
+            {recent.map((item, index) => (
+              <li key={`${item.ts}-${index}`} className={item.ok ? "wechat-recent-item" : "wechat-recent-item bad"}>
+                <span className={`wechat-recent-dir ${item.direction}`}>{item.direction === "in" ? "收到" : item.ok ? "发出" : "发送失败"}</span>
+                <span className="wechat-recent-chat">{item.title || item.chat}</span>
+                <span className="wechat-recent-text">{item.text}</span>
+                {item.error ? <span className="wechat-recent-error">{item.error}</span> : null}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="muted small">还没点过"看最近 20 条收发"。</p>
+        )}
+      </div>
     </Section>
   );
 }

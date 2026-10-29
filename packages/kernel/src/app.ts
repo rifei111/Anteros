@@ -536,6 +536,10 @@ export class App {
       }
       case "channels.wechat.disable":
         return this.wechat.disable();
+      case "channels.wechat.recent": {
+        this.permissions.assertOwner("查看微信通道最近收发");
+        return { items: this.wechat.recent(Number(params?.limit ?? 20)) };
+      }
       case "channels.wechat.listChats": {
         const limit = Math.min(Math.max(Number(p.limit ?? 40), 1), 200);
         return this.wechat.listCandidates(limit);

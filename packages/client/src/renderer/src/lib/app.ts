@@ -189,6 +189,7 @@ export async function refreshSnapshot(): Promise<void> {
 
 async function enterChat(): Promise<void> {
   await Promise.all([loadHistory(), loadPresets(), loadWechatChats()]);
+
   setState({ phase: "ready", unread: 0 });
   void markReadNow();
 }
@@ -318,6 +319,13 @@ export async function quitApplication(): Promise<void> {
 
 function wireEvents(): () => void {
   const cleanups: Array<() => void> = [];
+
+  cleanups.push(
+    subscribe("event.wechat", (payload) => {
+      // 通道开/关、加/删对话对象都推全量状态：左侧会话列表跟着刷新
+      if (Array.isArray(payload?.chats)) applyWechatChats(payload.chats);
+    }),
+  );
 
   cleanups.push(
     subscribe("event.message", (payload) => {

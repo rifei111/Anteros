@@ -1,4 +1,4 @@
-import { openAdmin, openSearch } from "../lib/app";
+import { openAdmin, openSearch, switchConversation } from "../lib/app";
 import { formatListTime, truncate } from "../lib/format";
 import { RELATION_STAGE_LABEL, labelOf } from "../lib/labels";
 import { useAppState } from "../lib/store";
@@ -19,7 +19,6 @@ export function Sidebar() {
       : truncate(lastMessage.text.replace(/^> .*\n/, ""), 22)
     : "还没有聊过";
 
-  const externalChannels = state.channels.filter((channel) => channel.kind === "external");
 
   return (
     <aside className="sidebar">
@@ -37,7 +36,11 @@ export function Sidebar() {
       </div>
 
       <div className="conv-list">
-        <button className="conv-item active" type="button">
+        <button
+          className={`conv-item${state.activeConversation === "app" ? " active" : ""}`}
+          type="button"
+          onClick={() => void switchConversation("app")}
+        >
           {state.agentAvatar ? (
             <img className="conv-avatar conv-avatar-image" src={state.agentAvatar} alt={agentName} />
           ) : (
@@ -55,22 +58,36 @@ export function Sidebar() {
           </div>
         </button>
 
-        {externalChannels.map((channel) => (
-          <button className="conv-item conv-external" type="button" key={channel.pluginId} disabled>
-            <div className="conv-avatar conv-avatar-muted">{channel.displayName.slice(0, 1)}</div>
-            <div className="conv-main">
-              <div className="conv-top">
-                <span className="conv-name">{channel.displayName}</span>
-                <span className="conv-tag">外部通道</span>
+        {state.wechatChats.map((chat) => {
+          const key = `wechat:${chat.username}`;
+          const active = state.activeConversation === key;
+          return (
+            <button
+              key={key}
+              className={`conv-item${active ? " active" : ""}`}
+              type="button"
+              onClick={() => void switchConversation(key)}
+              title={chat.username}
+            >
+              <div className="conv-avatar">{chat.kind === "group" ? "群" : (chat.title || chat.username).slice(0, 1)}</div>
+              <div className="conv-main">
+                <div className="conv-top">
+                  <span className="conv-name">{chat.title || chat.username}</span>
+                  {chat.kind === "group" ? <span className="conv-tag">群</span> : null}
+                </div>
+                <div className="conv-bottom">
+                  <span className="conv-summary">
+                    {chat.mode === "off"
+                      ? "只读不回复"
+                      : chat.kind === "group" && chat.mode === "mention"
+                        ? "@ 它才回"
+                        : `收到 ${chat.inboundCount} 条 · 发出 ${chat.outboundCount} 条`}
+                  </span>
+                </div>
               </div>
-              <div className="conv-bottom">
-                <span className="conv-summary">
-                  {channel.enabled ? "已启用，等待消息" : "未接入（默认关闭）"}
-                </span>
-              </div>
-            </div>
-          </button>
-        ))}
+            </button>
+          );
+        })}
       </div>
 
       <div className="sidebar-foot">
