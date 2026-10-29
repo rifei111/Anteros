@@ -407,7 +407,7 @@ def normalize_kind(raw: Any) -> str:
     return "other"
 
 
-GROUP_PREFIX = re.compile(r"^[A-Za-z0-9_@.\-]{3,64}:\n?")
+GROUP_PREFIX = re.compile(r"^[A-Za-z0-9_@.\-]{3,64}[:：]\n?")
 
 
 def self_names() -> List[str]:
@@ -430,8 +430,12 @@ def self_names() -> List[str]:
 def clean_group_text(raw: Any, sender: str) -> str:
     """剥掉群消息里的 "发送者wxid:\\n" 前缀。"""
     value = str(raw or "")
-    if sender and value.startswith(f"{sender}:"):
-        value = value[len(sender) + 1 :]
+    if sender:
+        for colon in (":", "："):
+            prefix = f"{sender}{colon}"
+            if value.startswith(prefix):
+                value = value[len(prefix) :]
+                break
     match = GROUP_PREFIX.match(value)
     if match:
         value = value[match.end() :]
@@ -442,14 +446,22 @@ def mentioned_me(text_value: str, names: List[str]) -> bool:
     """群里有没有 @ 我，或 @所有人。"""
     if not text_value:
         return False
-    lowered = text_value.lower()
+    # 全角＠也要认：有人用中文输入法打出来的就是全角
+    normalized = text_value.replace("＠", "@")
+    lowered = normalized.lower()
     for token in ("@所有人", "@all", "@全体成员"):
         if token.lower() in lowered:
             return True
-    for name in names:
-        if f"@{name}" in text_value:
+    lowered_names = [name.lower() for name in names if name]
+    for name in lowered_names:
+        if f"@{name}" in lowered:
             return True
     return False
+
+
+def is_group_chat(username: str) -> bool:
+    """群会话的 username 一定是 xxx@chatroom；私聊是 wxid_* / 自定义微信号。"""
+    return str(username or "").strip().lower().endswith("@chatroom")
 
 
 def method_list_chats(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -475,7 +487,7 @@ def method_list_chats(params: Dict[str, Any]) -> Dict[str, Any]:
             {
                 "username": username,
                 "title": title,
-                "kind": "group" if username.endswith("@chatroom") else "direct",
+                "kind": "group" if is_group_chat(username) else "direct",
                 "unread": int(row.get("unread") or 0),
                 "lastTime": int(row.get("last_time") or 0),
                 "lastSender": str(row.get("last_sender") or ""),
@@ -527,58 +539,113 @@ def method_inspect(params: Dict[str, Any]) -> Dict[str, Any]:
 def method_poll(params: Dict[str, Any]) -> Dict[str, Any]:
     db = load_db()
     if db is None:
-        return {"messages": [], "nextSeq": int(params.get("sinceSeq") or 0), "error": STATE.db_error}
-    since = int(params.get("sinceSeq") or 0)
-    limit = max(1, min(500, int(params.get("limit") or 100)))
-    with STATE.lock:
-        username = STATE.chat_username
-    try:
-        rows = db.get_new_messages(username, since_seq=since, limit=limit) or []
-    except Exception as error:  # noqa: BLE001
         return {
             "messages": [],
-            "nextSeq": since,
-            "error": f"{type(error).__name__}: {error}",
+            "nextSeq": int(params.get("sinceSeq") or 0),
+            "nextSeqs": {},
+            "error": STATE.db_error,
         }
-    messages: List[Dict[str, Any]] = []
-    next_seq = since
+    fallback_since = int(params.get("sinceSeq") or 0)
+    limit = max(1, min(500, int(params.get("limit") or 100)))
+    with STATE.lock:
+        default_chat = STATE.chat_username
+        default_title = STATE.chat_title
+
+    # 内核会一次把「所有要盯的会话」带过来：群聊和私聊同时盯，各盯各的水位。
+    targets: List[Dict[str, Any]] = []
+    raw_chats = params.get("chats")
+    if isinstance(raw_chats, list):
+        for item in raw_chats:
+            if not isinstance(item, dict):
+                continue
+            username = str(item.get("username") or "").strip()
+            if not username:
+                continue
+            targets.append(
+                {
+                    "username": username,
+                    "title": str(item.get("title") or ""),
+                    "kind": "group" if str(item.get("kind") or "").lower() == "group" else "direct",
+                    "sinceSeq": int(item.get("sinceSeq") or 0),
+                }
+            )
+    if not targets:
+        username = str(default_chat or "")
+        targets = [
+            {
+                "username": username,
+                "title": str(default_title or ""),
+                "kind": "group" if username.endswith("@chatroom") else "direct",
+                "sinceSeq": fallback_since,
+            }
+        ]
+
     # 上游 get_new_messages 返回的字段是 local_id / type / sender_username / content /
     # sort_seq / shard，**没有 is_self**。以前按 is_self 取，永远拿到 False，
     # 于是它自己发出去的回复又会被当成新消息读回来 → 自己跟自己无限对话。
     # 正确判据：发送者 wxid 等于当前登录账号的 wxid。
     self_wxid = str(getattr(db, "wxid", "") or "")
-    is_group = str(username or "").endswith("@chatroom")
-    names = self_names() if is_group else []
-    for row in rows:
-        seq = int(row.get("sort_seq") or row.get("seq") or 0)
-        next_seq = max(next_seq, seq)
-        sender = str(row.get("sender_username") or row.get("sender") or "")
-        is_self = bool(self_wxid) and sender == self_wxid
-        messages.append(
-            {
-                "seq": seq,
-                "msgId": str(row.get("msg_id") or row.get("server_id") or row.get("local_id") or "") or None,
-                "chatUsername": str(row.get("username") or username),
-                "senderUsername": sender,
-                "isSelf": is_self,
-                "kind": normalize_kind(row.get("kind") or row.get("type")),
-                "text": (
-                    clean_group_text(row.get("content") if row.get("content") is not None else row.get("text"), sender)
-                    if is_group
-                    else (row.get("content") if row.get("content") is not None else row.get("text"))
-                ),
-                "mentioned": (
-                    mentioned_me(
-                        clean_group_text(row.get("content") if row.get("content") is not None else row.get("text"), sender),
-                        names,
-                    )
-                    if is_group
-                    else False
-                ),
-            }
-        )
-    return {"messages": messages, "nextSeq": next_seq}
+    all_names = self_names()
+    messages: List[Dict[str, Any]] = []
+    next_seqs: Dict[str, int] = {}
+    error: Optional[str] = None
+    nick_cache: Dict[str, str] = {}
 
+    def sender_title(username: str) -> str:
+        if not username:
+            return ""
+        cached = nick_cache.get(username)
+        if cached is not None:
+            return cached
+        try:
+            value = db.get_nickname(username)
+        except Exception:  # noqa: BLE001
+            value = None
+        text_value = str(value or "").strip()
+        nick_cache[username] = text_value
+        return text_value
+
+    for target in targets:
+        username = target["username"]
+        chat_since = max(int(target.get("sinceSeq") or 0), 0)
+        next_seqs[username] = chat_since
+        is_group = target["kind"] == "group" or is_group_chat(username)
+        try:
+            rows = db.get_new_messages(username, since_seq=chat_since, limit=limit) or []
+        except Exception as exc:  # noqa: BLE001
+            error = f"{type(exc).__name__}: {exc}"
+            continue
+        for row in rows:
+            seq = int(row.get("sort_seq") or row.get("seq") or 0)
+            next_seqs[username] = max(next_seqs[username], seq)
+            sender = str(row.get("sender_username") or row.get("sender") or "")
+            is_self = bool(self_wxid) and sender == self_wxid
+            raw_text = row.get("content") if row.get("content") is not None else row.get("text")
+            text_value = clean_group_text(raw_text, sender) if is_group else raw_text
+            messages.append(
+                {
+                    "seq": seq,
+                    "msgId": str(row.get("msg_id") or row.get("server_id") or row.get("local_id") or "") or None,
+                    "chatUsername": username,
+                    "chatTitle": target.get("title") or "",
+                    "chatKind": "group" if is_group else "direct",
+                    "senderUsername": sender,
+                    "senderTitle": sender_title(sender) if is_group else "",
+                    "isSelf": is_self,
+                    "kind": normalize_kind(row.get("kind") or row.get("type")),
+                    "text": text_value,
+                    "mentioned": (mentioned_me(text_value, all_names) if is_group else False),
+                }
+            )
+
+    result: Dict[str, Any] = {"messages": messages, "nextSeqs": next_seqs}
+    if next_seqs:
+        result["nextSeq"] = max(next_seqs.values())
+    else:
+        result["nextSeq"] = fallback_since
+    if error:
+        result["error"] = error
+    return result
 
 def method_send(params: Dict[str, Any]) -> Dict[str, Any]:
     text = str(params.get("text") or "").strip()

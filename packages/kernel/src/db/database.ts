@@ -40,7 +40,16 @@ export class Db {
     if (current > SCHEMA_VERSION) {
       throw new AnterosError(ERROR_CODES.EVERSION, `数据库版本 ${current} 高于内核支持的 ${SCHEMA_VERSION}，请升级应用`);
     }
-    // 迁移只加列、两版删列（规范 1 §6.2）。当前只有 v1。
+    // 迁移只加列、两版删列（规范 1 §6.2）。
+    if (current < 2) {
+      // v1 → v2：群聊要显示是谁说的，messages 加两列。
+      // 先查 PRAGMA 再 ALTER：库里可能已被手工补过列（或迁移中途断电），
+      // 重复 ALTER 会报 duplicate column 让应用直接起不来——必须幂等。
+      const columns = new Set(this.all<{ name: string }>("PRAGMA table_info(messages)").map((column) => column.name));
+      if (!columns.has("sender_name")) this.handle.exec("ALTER TABLE messages ADD COLUMN sender_name TEXT");
+      if (!columns.has("sender_id")) this.handle.exec("ALTER TABLE messages ADD COLUMN sender_id TEXT");
+      this.handle.exec("PRAGMA user_version = 2;");
+    }
   }
 
   get<T>(sql: string, params: SqlParams = []): T | undefined {

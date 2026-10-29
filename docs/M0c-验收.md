@@ -454,3 +454,30 @@ New version 0.6.1 has been downloaded to ...\pending\Anteros-Setup-0.6.1-x64.exe
 
 ### 22.3 未验证
 - 真实微信群里的多人发言顺序、@ 判定依赖上游 `mentioned` 字段；本机只做了通道层与队列层的验证，没有真人多群并发压测。
+
+## 23. v1.0.2 增补（群聊真的收到、看得出谁在说话）
+
+### 23.1 修的两个真问题
+
+| # | 现象 | 根因 | 修在哪 |
+| --- | --- | --- | --- |
+| 1 | 群聊消息一条都收不到，也不会回 | 旁路 `method_poll` 只轮询「一个会话」，内核传下去的 `chats` 清单被忽略 | `integrations/wechatauto-sidecar/sidecar.py` 的 `method_poll` 改成按 `chats` 逐个会话轮询、各自带水位 |
+| 2 | 群里分不清谁在说话；它的回复跑到左边 | 消息没带发送者信息；气泡按私聊语义（用户右、agent 左）排版 | `packages/shared/src/domain.ts` 的 `ChatMessage.senderName/senderId` + `packages/client/src/renderer/src/components/Bubble.tsx` 的群聊分支（群成员左侧带昵称头像、它在右侧） |
+
+### 23.2 顺手修的两个坑
+
+- `packages/kernel/src/db/database.ts` 的 `migrate()`：v1→v2 加列前先查 `PRAGMA table_info`，重复列不再让应用起不来（补 3 个迁移测试）。
+- sidecar 的群消息解析：全角 `＠`、全角 `：` 都归一；@ 判定大小写不敏感；新增 `is_group_chat()` 统一判群。
+
+### 23.3 验证记录
+
+| 验证项 | 命令 | 结果 |
+| --- | --- | --- |
+| 单元/集成测试 | `npm test` | 21 文件 119 用例全绿（新增群聊气泡 4、迁移 3） |
+| 内核端到端冒烟 | `npm run smoke:kernel` | 92 项通过 0 失败（新增会话分线 2 项） |
+| 旁路群聊解析 | `npm run test:sidecar` | 14 项通过（本机无 Python 时跳过） |
+| 真实群消息收发 | —— | **未验证**：需要微信群里有真人说话。通道页「看最近 20 条收发」是最终判据 |
+
+### 23.4 不谎报
+
+解析、会话分线、界面布局三层是我这边验过的；"群里发一句它真的回"必须真机、真人、真微信才能验，装好后在群里 @ 它一次即可确认。

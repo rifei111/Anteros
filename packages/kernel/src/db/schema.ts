@@ -15,7 +15,7 @@
  * 3. 单一写入入口：只有 service 层写库，不允许应用层直接 UPDATE。
  */
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const SCHEMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -271,7 +271,10 @@ CREATE TABLE IF NOT EXISTS messages (
   recalled      INTEGER NOT NULL DEFAULT 0,
   client_ack_ts INTEGER,
   channel_id    TEXT NOT NULL DEFAULT 'app',
-  delivery      TEXT NOT NULL DEFAULT 'sent'
+  delivery      TEXT NOT NULL DEFAULT 'sent',
+  -- 群聊：这句话是谁说的（昵称 / wxid）。私聊为空。
+  sender_name   TEXT,
+  sender_id     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_messages_agent_ts ON messages (agent_id, ts DESC);
 

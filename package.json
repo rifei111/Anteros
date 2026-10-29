@@ -1,6 +1,6 @@
 {
   "name": "anteros",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "description": "Anteros：一台 Windows 电脑上跑通的拟人智能体单机闭环（内核 + Windows 主客户端 + 插件）。",
   "license": "MIT",
@@ -28,7 +28,8 @@
     "package": "npm run build && npm run package -w @anteros/client",
     "lint": "node scripts/check-boundaries.mjs",
     "smoke:kernel": "node scripts/smoke-kernel.mjs",
-    "verify": "npm run build:shared && npm run build:kernel && npm run lint && npm test && npm run smoke:kernel"
+    "verify": "npm run build:shared && npm run build:kernel && npm run lint && npm test && npm run smoke:kernel",
+    "test:sidecar": "node scripts/test-sidecar-group.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",

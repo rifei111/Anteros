@@ -587,7 +587,10 @@ try {
   check("加私聊对象默认「都回」", directTarget?.mode === "all" && directTarget?.kind === "direct");
   const addedGroup = await call("channels.wechat.addChat", { username: "12345@chatroom", title: "冒烟群" });
   const groupTarget = (addedGroup.chats ?? []).find((item) => item.username === "12345@chatroom");
-  check("加群默认「只在被 @ 时回」，且识别成 group", groupTarget?.mode === "mention" && groupTarget?.kind === "group");
+  check("加群默认就是「都回」（嫌吵可在界面切到只在被 @ 时回）", groupTarget?.mode === "all" && groupTarget?.kind === "group");
+const mentionBack = await call("channels.wechat.setChatMode", { username: "12345@chatroom", mode: "mention" });
+check("群里也可以切成「只在被 @ 时回」", (mentionBack.chats ?? []).find((item) => item.username === "12345@chatroom")?.mode === "mention");
+await call("channels.wechat.setChatMode", { username: "12345@chatroom", mode: "all" });
   const modeChanged = await call("channels.wechat.setChatMode", { username: "12345@chatroom", mode: "off" });
   check("能改群的回话模式", (modeChanged.chats ?? []).find((item) => item.username === "12345@chatroom")?.mode === "off");
   const removed = await call("channels.wechat.removeChat", { username: "wxid_smoke_direct" });
@@ -643,6 +646,21 @@ try {
     "勾掉「清空聊天记录」时对话保留、记忆仍清零",
     keptHistory.messages.length > 0 && keptStats.total === 0,
     `历史 ${keptHistory.messages.length} 条 / 记忆 ${keptStats.total} 条`,
+  );
+  /* ---- 第 20 组：会话分线（群聊走独立会话键，应用内主会话不受影响） ---- */
+  const groupKey = "wechat:45226657898@chatroom";
+  await call("chat.send", { text: "群里测试一句", clientTs: Date.now(), conversation: groupKey });
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const groupHistory = await call("chat.history", { limit: 20, conversation: groupKey });
+  const appHistory = await call("chat.history", { limit: 20 });
+  check(
+    "群聊消息落在它自己的会话线里",
+    groupHistory.messages.some((message) => String(message.text).includes("群里测试一句")),
+  );
+  check(
+    "应用内主会话不会被群聊消息污染",
+    !appHistory.messages.some((message) => String(message.text).includes("群里测试一句")),
+    "主会话 " + appHistory.messages.length + " 条",
   );
 } catch (error) {
   check("端到端流程", false, error.message);

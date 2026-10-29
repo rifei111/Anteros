@@ -84,6 +84,9 @@ export interface WechatChannelOptions {
     chatTitle: string;
     chatKind: "direct" | "group";
     mentioned: boolean;
+    /** 群聊里发言的人（昵称优先，没有就用 wxid）；私聊为空 */
+    senderName?: string;
+    senderId?: string;
   }) => Promise<void>;
   /** 把 agent 的一条分条发回微信（第二个参数是会话；不传就发到第一个会话） */
   sendOutbound: (text: string, chatUsername?: string) => void;
@@ -120,6 +123,8 @@ export class WechatChannelService {
   private outboundCount = 0;
   private pollTimer: NodeJS.Timeout | null = null;
   private sinceSeq: number | null = null;
+  /** 每个会话各自的水位：群聊和私聊同时盯，不能共用一个 */
+  private sinceSeqByChat = new Map<string, number>();
   private deepChecksDone = false;
   /** 旁路进程是单线程的：发消息/预热期间它没法响应 poll，这段时间暂停巡检 */
   private sendInFlight = 0;
@@ -283,7 +288,7 @@ export class WechatChannelService {
       username,
       title: (input.title ?? "").trim() || username,
       kind,
-      mode: input.mode ?? (kind === "group" ? "mention" : "all"),
+      mode: input.mode ?? "all",
       inboundCount: 0,
       outboundCount: 0,
       lastMessageTs: null,
@@ -937,7 +942,7 @@ export class WechatChannelService {
             username: chatUsername,
             title: chatUsername,
             kind: chatUsername.endsWith("@chatroom") ? "group" : "direct",
-            mode: chatUsername.endsWith("@chatroom") ? "mention" : "all",
+            mode: "all",
             inboundCount: 0,
             outboundCount: 0,
             lastMessageTs: null,
@@ -978,7 +983,7 @@ export class WechatChannelService {
         username: value,
         title: this.chatTitle ?? value,
         kind,
-        mode: kind === "group" ? "mention" : "all",
+        mode: "all",
         inboundCount: 0,
         outboundCount: 0,
         lastMessageTs: null,
@@ -1183,15 +1188,19 @@ export class WechatChannelService {
   }
 
   private async pollOnce(): Promise<void> {
-    const sinceSeq = this.sinceSeq ?? 0;
     const targets = this.chats();
     if (targets.length === 0) return;
     const result = (await this.request(
       "poll",
       {
-        sinceSeq,
+        sinceSeq: this.sinceSeq ?? 0,
         limit: 100,
-        chats: targets.map((chat) => ({ username: chat.username, title: chat.title, kind: chat.kind })),
+        chats: targets.map((chat) => ({
+          username: chat.username,
+          title: chat.title,
+          kind: chat.kind,
+          sinceSeq: this.sinceSeqByChat.get(chat.username) ?? 0,
+        })),
       },
       REQUEST_TIMEOUT_MS,
     )) as {
@@ -1199,15 +1208,29 @@ export class WechatChannelService {
         seq?: number;
         msgId?: string | null;
         chatUsername?: string;
+        chatTitle?: string;
+        chatKind?: string;
         senderUsername?: string;
+        senderTitle?: string;
         isSelf?: boolean;
         kind?: string;
         text?: string | null;
         mentioned?: boolean;
       }>;
       nextSeq?: number;
+      nextSeqs?: Record<string, number>;
+      error?: string;
     };
-    if (typeof result.nextSeq === "number") this.sinceSeq = result.nextSeq;
+    if (result.error && String(result.error).length > 0) {
+      this.lastError = "读消息出错：" + String(result.error);
+    }
+    for (const [username, value] of Object.entries(result.nextSeqs ?? {})) {
+      if (typeof value === "number") this.sinceSeqByChat.set(username, value);
+    }
+    if (typeof result.nextSeq === "number") {
+      this.sinceSeq = Math.max(this.sinceSeq ?? 0, result.nextSeq);
+    }
+
     for (const message of result.messages ?? []) {
       if (message.isSelf === true) continue;
       // 旁路进程负责把上游的中文类型归一成 text/image/…，这里再兜一层：
@@ -1217,10 +1240,12 @@ export class WechatChannelService {
       const text = (message.text ?? "").trim();
       if (text.length === 0) continue;
       const chatUsername = String(message.chatUsername ?? "").trim();
-      const target = targets.find((chat) => chat.username === chatUsername) ?? targets[0]!;
+      // 认不出是哪个会话的消息不能乱记到第一个会话头上（以前就是这么串线的）
+      const target = targets.find((chat) => chat.username === chatUsername);
+      if (!target) continue;
       // 只看不回：连计数都不动，免得界面上以为它在处理
       if (target.mode === "off") continue;
-      // 群聊默认只在被 @ 时开口；私聊跟人说过的每句都要接
+      // 群聊默认跟着所有消息回；切成「只在被 @ 时回」的，非 @ 消息就不接
       if (target.kind === "group" && target.mode === "mention" && message.mentioned !== true) continue;
       this.lastInboundTs = Date.now();
       this.inboundCount += 1;
@@ -1228,7 +1253,16 @@ export class WechatChannelService {
       stats.inbound += 1;
       stats.lastTs = Date.now();
       this.perChat.set(target.username, stats);
+      this.pushRecent({
+        direction: "in",
+        chat: target.username,
+        title: target.title,
+        text,
+        ok: true,
+      });
       this.publish();
+      const senderName = String(message.senderTitle ?? "").trim();
+      const senderId = String(message.senderUsername ?? "").trim();
       try {
         await this.options.onInbound({
           text,
@@ -1237,9 +1271,11 @@ export class WechatChannelService {
           chatTitle: target.title,
           chatKind: target.kind,
           mentioned: message.mentioned === true,
+          senderName: target.kind === "group" ? senderName || senderId : undefined,
+          senderId: target.kind === "group" ? senderId : undefined,
         });
       } catch (error) {
-        this.deps.log.warn(`wechat inbound failed: ${(error as Error)?.message ?? String(error)}`);
+        this.deps.log.warn("wechat inbound failed: " + ((error as Error)?.message ?? String(error)));
       }
     }
   }

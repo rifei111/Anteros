@@ -2914,3 +2914,18 @@ ul {
 .wechat-test-bad {
   color: #b3261e;
 }
+/* 群聊：它占右边、群成员带昵称在左边 */
+.msg-right {
+  flex-direction: row-reverse;
+}
+.msg-right .msg-col {
+  align-items: flex-end;
+}
+.avatar-member {
+  background: linear-gradient(135deg, #8a8f98, #b3b8c1);
+}
+.msg-sender {
+  font-size: 11px;
+  color: var(--text-muted, #8a8f98);
+  margin: 0 2px 2px;
+}

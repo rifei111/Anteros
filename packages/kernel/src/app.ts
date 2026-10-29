@@ -144,7 +144,7 @@ export class App {
       emit: (method, params) => this.emit(method, params),
       // 收到某个会话的消息：按会话排队，轮到了再走一遍对话编排，分条发回同一个会话。
       // 不直接 await：一条回复要十几秒，阻塞住巡检就收不到下一条了。
-      onInbound: async ({ text, externalId, chatUsername, chatTitle }) => {
+      onInbound: async ({ text, externalId, chatUsername, chatTitle, senderName, senderId }) => {
         const key = `wechat:${chatUsername}`;
         this.conversationQueue.offer({
           key,
@@ -154,6 +154,8 @@ export class App {
               text,
               eventId: `wechat:${externalId}`,
               conversation: key,
+              // 群聊：谁说的要落库、也要进上下文
+              author: senderName ? { name: senderName, id: senderId ?? null } : undefined,
               onPart: (part) => this.wechat.send(part, chatUsername),
             });
           },

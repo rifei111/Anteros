@@ -62,6 +62,8 @@ const SMOKE_TAB = (process.env.ANTEROS_SMOKE_TAB ?? "").trim();
 const SMOKE_PERSONA_TEXT = (process.env.ANTEROS_SMOKE_PERSONA_TEXT ?? "").trim();
 /** 自检时点开的按钮文案（例如「录入密钥」「授权」），用来把弹窗截进图里。 */
 const SMOKE_CLICK = (process.env.ANTEROS_SMOKE_CLICK ?? "").trim();
+/** 自检：进到指定会话（按左侧列表里的标题或微信号包含匹配），例如原神群。 */
+const SMOKE_CONVERSATION = (process.env.ANTEROS_SMOKE_CONVERSATION ?? "").trim();
 /** 自检时发出去的测试消息（chat 视图），用来确认一条消息只渲染一次。 */
 const SMOKE_SEND = (process.env.ANTEROS_SMOKE_SEND ?? "").trim();
 
@@ -401,6 +403,24 @@ async function openAdminTab(window: BrowserWindow): Promise<void> {
   await fillPersonaAndCompile(window);
 }
 
+/** 自检用：点左侧某个会话，用来验证群聊这类多会话界面。 */
+async function selectSmokeConversation(window: BrowserWindow): Promise<void> {
+  if (SMOKE_CONVERSATION.length === 0) return;
+  const ok = await scriptInPage(
+    window,
+    `(() => {
+      const wanted = ${JSON.stringify(SMOKE_CONVERSATION)};
+      const items = Array.from(document.querySelectorAll(".conv-item"));
+      const found = items.find((item) => (item.textContent || "").includes(wanted));
+      if (!found) return false;
+      found.click();
+      return true;
+    })()`,
+  );
+  console.warn(`[anteros] 自检切会话：${SMOKE_CONVERSATION} -> ${String(ok)}`);
+  await sleep(1200);
+}
+
 /** 自检用：点一个文案里带指定字样的按钮（例如「录入密钥」「授权」），用来截到弹窗。 */
 async function clickSmokeButton(window: BrowserWindow): Promise<void> {
   if (SMOKE_CLICK.length === 0) return;
@@ -658,13 +678,23 @@ function scheduleSmokeScreenshot(window: BrowserWindow): void {
           if (SMOKE_VIEW === "admin") {
             await openAdminPanel(window);
             await driveUpdateFlow(window);
-          } else await sendSmokeMessage(window);
+          } else {
+            await selectSmokeConversation(window);
+            // 指定了会话就只看那个会话的现有消息，不再往里面塞测试消息
+            if (SMOKE_CONVERSATION.length === 0) await sendSmokeMessage(window);
+          }
         }
         await sleep(SMOKE_SETTLE_MS);
         await writeSmokeReport(window);
         await captureSmokeScreenshot(window, targetPath);
       } catch (error) {
         console.error("[anteros] 自检流程失败，仍尝试截图：", error);
+        // 失败也要留诊断：没有报告就只剩黑箱，自检等于白跑
+        try {
+          await writeSmokeReport(window);
+        } catch (reportError) {
+          console.error("[anteros] 失败时写自检报告也失败了:", reportError);
+        }
         try {
           await captureSmokeScreenshot(window, targetPath);
         } catch (captureError) {
@@ -688,9 +718,16 @@ async function writeSmokeReport(window: BrowserWindow): Promise<void> {
         const api = window.anteros && window.anteros.updates;
         const status = api ? await api.status() : null;
         const panel = document.querySelector(".admin-panel");
+        const rows = Array.from(document.querySelectorAll(".msg-row"));
         return {
           updateStatus: status,
           panelText: (panel ? panel.innerText : document.body.innerText || "").slice(0, 4000),
+          chatText: (document.querySelector(".chat-list") ? document.querySelector(".chat-list").innerText : "").slice(0, 4000),
+          bubbleLayout: {
+            right: rows.filter((row) => row.classList.contains("msg-right")).length,
+            left: rows.filter((row) => row.classList.contains("msg-left")).length,
+            senderLabels: Array.from(document.querySelectorAll(".msg-sender")).map((node) => node.textContent || ""),
+          },
         };
       })()`,
     );

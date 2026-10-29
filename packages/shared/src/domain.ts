@@ -242,6 +242,10 @@ export interface ChatMessage {
   recalled: boolean;
   channelId: string;
   delivery: MessageDelivery;
+  /** 群聊：这句话是谁说的（昵称优先）。私聊与 agent 消息为空。 */
+  senderName?: string | null;
+  /** 群聊：发言者 wxid（用来去重与区分同名的人） */
+  senderId?: string | null;
 }
 
 /** 分条发送计划（规范 1 §4.3）：服务端决定 parts 与间隔，客户端不得自行改。 */

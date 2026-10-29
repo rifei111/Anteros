@@ -47,6 +47,8 @@ export class ChatService {
     presence?: { isTyping?: boolean; appFocused?: boolean; lastInteractionMs?: number };
     /** 每发出一条分条时回调（内置外部通道用它把话转出去；客户端不用传） */
     onPart?: (text: string, index: number) => void;
+    /** 群聊里这句话是谁说的：落库供界面显示，也拼进模型上下文，免得张冠李戴 */
+    author?: { name?: string | null; id?: string | null };
   }): Promise<ChatReplyResult> {
     const { deps, consent } = this.parts;
     consent.requireConsent("app");
@@ -62,6 +64,10 @@ export class ChatService {
     }
 
     const conversation = (input.conversation ?? "app").trim() || "app";
+    const authorName = String(input.author?.name ?? "").trim();
+    const authorId = String(input.author?.id ?? "").trim();
+    // 群聊里模型必须知道「这句是谁说的」；私聊不加前缀，保持原样
+    const spokenText = authorName.length > 0 ? authorName + "：" + text : text;
     return this.serial(async () => {
       const now = Date.now();
       const { ports } = this.parts;
@@ -78,8 +84,8 @@ export class ChatService {
           epoch,
         ]);
         const msg = deps.db.run(
-          "INSERT INTO messages(agent_id, role, text, ts, recalled, channel_id, delivery) VALUES (?, 'user', ?, ?, 0, ?, 'sent')",
-          [deps.agentId, text, now, conversation],
+          "INSERT INTO messages(agent_id, role, text, ts, recalled, channel_id, delivery, sender_name, sender_id) VALUES (?, 'user', ?, ?, 0, ?, 'sent', ?, ?)",
+          [deps.agentId, text, now, conversation, authorName.length > 0 ? authorName : null, authorId.length > 0 ? authorId : null],
         );
         const turn = deps.db.run("INSERT INTO turns(agent_id, user_msg_id, trigger, created_ts, outcome) VALUES (?, ?, 'reply', ?, 'planning')", [
           deps.agentId,
@@ -104,7 +110,7 @@ export class ChatService {
       try {
         plan = await ports.expression.planReply({
           agentId: deps.agentId,
-          userText: text,
+          userText: spokenText,
           trigger: "reply",
           now,
           conversation,
@@ -270,6 +276,8 @@ interface MessageRow {
   recalled: number;
   channel_id: string;
   delivery: MessageDelivery;
+  sender_name: string | null;
+  sender_id: string | null;
 }
 
 function toChatMessage(row: MessageRow): ChatMessage {
@@ -283,6 +291,8 @@ function toChatMessage(row: MessageRow): ChatMessage {
     recalled: row.recalled === 1,
     channelId: row.channel_id,
     delivery: row.delivery,
+    senderName: row.sender_name ?? null,
+    senderId: row.sender_id ?? null,
   };
 }
 

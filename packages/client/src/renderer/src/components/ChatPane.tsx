@@ -137,6 +137,7 @@ export function ChatPane() {
         message={message}
         agentName={agentName}
         agentAvatar={state.agentAvatar}
+        groupMode={state.activeConversation.includes("@chatroom")}
         onContextMenu={(event, target) =>
           setMenu({
             x: Math.min(event.clientX, globalThis.innerWidth - 160),
