@@ -1017,8 +1017,10 @@ def main() -> None:
                 pass
             payload_text = args.isolated
             if args.isolated_file:
-                with open(args.isolated_file, "r", encoding="utf-8") as handle:
-                    payload_text = handle.read()
+                # 注意：这里不能叫 handle —— main() 后面还要调 handle(line)，
+                # 同名局部变量会把整个函数里的 handle 变成「未赋值的局部变量」。
+                with open(args.isolated_file, "r", encoding="utf-8") as file_handle:
+                    payload_text = file_handle.read()
             payload = json.loads(payload_text or "{}")
             action = str(payload.get("action") or "send")
             result = isolated_warmup(payload) if action == "warmup" else isolated_send(payload)
