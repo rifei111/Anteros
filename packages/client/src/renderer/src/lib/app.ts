@@ -329,6 +329,14 @@ function wireEvents(): () => void {
 
   cleanups.push(
     subscribe("event.message", (payload) => {
+      // 会话隔离：别的会话线（别的微信对象、某个群）的消息不往当前列表里塞，
+      // 否则"群里说的话会出现在私聊里"。切过去时 switchConversation 会重新拉历史。
+      const channelId = typeof payload?.channelId === "string" ? payload.channelId.trim() : "";
+      const key = channelId.length > 0 ? channelId : "app";
+      if (key !== getState().activeConversation) {
+        setState((previous) => ({ unread: previous.unread + 1 }));
+        return;
+      }
       upsertMessage(payload);
     }),
   );

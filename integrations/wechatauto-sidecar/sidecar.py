@@ -100,6 +100,66 @@ def load_db() -> Any:
         return STATE.db
 
 
+_TITLE_CACHE: Dict[str, str] = {}
+
+
+_MAX_GROUP_MEMBERS_IN_TITLE = 4
+
+
+def compose_group_title(db: Any, chatroom_wxid: str) -> str:
+    """没有自定义群名时，按微信的显示规则拼「成员昵称、成员昵称…」。
+
+    微信对没起名的群显示前几个成员名；搜索框按这个串能命中该群。
+    拼不出来就返回空串，让调用方退到「只按 wxid 搜」而不是猜一个名字。
+    """
+    try:
+        groups = db.get_groups() or []
+    except Exception:  # noqa: BLE001
+        return ""
+    for group in groups:
+        if str(group.get("username") or "") != chatroom_wxid:
+            continue
+        names: List[str] = []
+        for member in group.get("members") or []:
+            nickname = str(member.get("remark") or member.get("nick_name") or "").strip()
+            if nickname and nickname not in names:
+                names.append(nickname)
+            if len(names) >= _MAX_GROUP_MEMBERS_IN_TITLE:
+                break
+        return "、".join(names)
+    return ""
+
+def resolve_chat_title(username: str) -> str:
+    """把 wxid / xxx@chatroom 解析成界面里显示的会话名。
+
+    群聊的显示名必须解析出来：只传 wxid 时上游要按名字搜索会话，
+    搜不到就会退回「当前打开的会话」，于是回复发错人。
+    """
+    key = normalize_username(username)
+    if not key:
+        return ""
+    cached = _TITLE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    title = ""
+    try:
+        db = load_db()
+        if db is not None:
+            for session in db.get_sessions(limit=500) or []:
+                if normalize_username(str(session.get("username") or "")) == key:
+                    title = str(session.get("title") or "").strip()
+                    break
+            if not title and key.endswith("@chatroom"):
+                # 没有自定义群名时，微信显示的是「成员昵称、成员昵称…」这种自动名。
+                # 这种群在库里 nick_name 是空的，只能照微信的规则拼一个出来。
+                title = compose_group_title(db, key)
+            if not title:
+                title = str(db.get_nickname(key) or "").strip()
+    except Exception:  # noqa: BLE001
+        title = ""
+    _TITLE_CACHE[key] = title
+    return title
+
 def get_gui() -> Any:
     """复用同一个 WeChatGUI 实例。
 
@@ -652,21 +712,32 @@ def method_send(params: Dict[str, Any]) -> Dict[str, Any]:
     if not text:
         return {"ok": False, "error": "不发送空文本"}
     raw = str(params.get("chatUsername") or STATE.chat_username or CHAT_DEFAULT)
+    requested_title = str(params.get("chatTitle") or "").strip()
     gui = get_gui()
     if gui is None:
         return {"ok": False, "error": f"发消息模块不可用：{STATE.gui_error or '界面驱动未就绪'}"}
 
     with STATE.lock:
         username = normalize_username(raw)
-        title = STATE.chat_title
+        configured = normalize_username(str(STATE.chat_username or ""))
     # 界面里认的是**会话显示名**（备注/昵称），不是 wxid。传显示名才能命中上游
     # 的「当前会话就是目标」快路径；传 wxid 每发一条都要重新搜索会话。
-    targets = [value for value in [title, username] if value]
+    #
+    # 注意：这里绝对不能用 STATE.chat_title 兜底。那是「白名单会话」的标题，
+    # 当回复目标是别的会话（比如某个群）时，用它会把消息发到白名单那一边去。
+    title = requested_title or resolve_chat_title(username) or ""
+    if username and configured and username == configured and not title:
+        title = STATE.chat_title or ""
+    targets = [value for value in [title, username] if value] if title else [username]
+
+    # 群聊一律回读确认：群名是拼出来的，搜错会话的话水印回读能立刻发现，
+    # 宁可报「没发出去」也不能把话发到另一个会话里。
+    verify = bool(params.get("verify")) or username.endswith("@chatroom")
 
     def attempt(target: Optional[str]) -> Any:
         if target:
-            return gui.send_msg(text, who=target, verify=False)
-        return gui.send_msg(text, verify=False)
+            return gui.send_msg(text, who=target, verify=verify)
+        return gui.send_msg(text, verify=verify)
 
     last_error = None
     for target in targets or [None]:

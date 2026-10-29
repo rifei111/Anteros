@@ -26,6 +26,10 @@ export function ExpressionTab() {
   const [busy, setBusy] = useState(false);
 
   const currentMode: AgentMode = relation?.mode ?? "standard";
+  // 快照/事件里的关系对象在某些版本里可能没有 transitionLog（旧数据、旧内核），
+  // 这里一律兜成空数组：一个字段缺失不该让整个面板白屏。
+  const transitionLog = relation?.transitionLog ?? [];
+  const ledgerEntries = ledger.data?.entries ?? [];
 
   const switchMode = async (mode: AgentMode): Promise<void> => {
     setBusy(true);
@@ -113,9 +117,9 @@ export function ExpressionTab() {
           </div>
         </div>
 
-        {relation.transitionLog.length > 0 ? (
+        {transitionLog.length > 0 ? (
           <ul className="bullet-list muted">
-            {relation.transitionLog
+            {transitionLog
               .slice(-8)
               .reverse()
               .map((entry, index) => (
@@ -163,9 +167,9 @@ export function ExpressionTab() {
         action={<button className="btn btn-ghost" onClick={() => ledger.reload()}>刷新</button>}
       >
         <LoadingLine loading={ledger.loading} error={ledger.error} />
-        {ledger.data && ledger.data.entries.length > 0 ? (
+        {ledgerEntries.length > 0 ? (
           <ul className="ledger-list">
-            {ledger.data.entries.map((entry) => (
+            {ledgerEntries.map((entry) => (
               <li key={entry.id} className="ledger-item">
                 <div className="ledger-meta muted">{formatDateTime(entry.ts)}</div>
                 <div className="ledger-situation">{entry.situation}</div>

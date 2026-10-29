@@ -1367,6 +1367,21 @@ export class WechatChannelService {
     const wanted = (chatUsername ?? "").trim();
     const found = wanted.length > 0 ? chats.find((chat) => chat.username === wanted) : undefined;
     if (found) return found;
+    if (wanted.length > 0) {
+      // 目标会话不在白名单里也不能退回 chats[0]：那会把群里的回复发到白名单那个人身上。
+      // 显示名由旁路按 wxid 自己解析，这里只需要带上身份与类型。
+      return {
+        username: wanted,
+        title: wanted,
+        kind: wanted.endsWith("@chatroom") ? "group" : "direct",
+        mode: "all",
+        inboundCount: 0,
+        outboundCount: 0,
+        lastMessageTs: null,
+        queueDepth: 0,
+        lastError: null,
+      };
+    }
     const first = chats[0];
     if (first) return first;
     return {

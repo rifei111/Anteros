@@ -67,6 +67,9 @@ const bridge: ClientBridge & {
   },
 
   on<E extends KernelEventName>(event: E, handler: (payload: KernelEvents[E]) => void): () => void {
+    // 每个 on() 都会往 ipcRenderer 上挂一个监听，事件种类多了会顶到 Node 默认的
+    // 10 个上限并打印 MaxListenersExceededWarning。这里一次把上限抬高，避免噪声。
+    ipcRenderer.setMaxListeners(Math.max(ipcRenderer.getMaxListeners(), 64));
     const listener = (_ipcEvent: Electron.IpcRendererEvent, method: unknown, payload: unknown): void => {
       if (method !== event) return;
       handler(payload as KernelEvents[E]);

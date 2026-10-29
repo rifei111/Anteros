@@ -481,3 +481,24 @@ New version 0.6.1 has been downloaded to ...\pending\Anteros-Setup-0.6.1-x64.exe
 ### 23.4 不谎报
 
 解析、会话分线、界面布局三层是我这边验过的；"群里发一句它真的回"必须真机、真人、真微信才能验，装好后在群里 @ 它一次即可确认。
+
+## 24. v1.0.3 增补
+
+### 24.1 修了什么
+
+| 问题 | 真因 | 修法 |
+| --- | --- | --- |
+| 点「表达与完全体」全白 | 面板假设 `relation.transitionLog` 必存在，旧数据里没有 → 读 `.length` 抛错 → React 树卸载 | 面板内兜底 `?? []`；IPC 监听上限抬高消掉 MaxListeners 警告 |
+| 群回复发到白名单那个人 | `method_send` 用 `STATE.chat_title`（白名单会话标题）当兜底目标 | 按目标 wxid 解析会话名（含群），解析失败只按 wxid；不再用白名单标题 |
+| 群消息出现在私聊 | 界面收到 `event.message` 不分会话线一律 upsert | 按 `channelId` 过滤，非当前会话只记未读，切会话重拉历史 |
+
+### 24.2 验证
+
+- `npm test` 21 文件 119 用例全绿；`node scripts/check-boundaries.mjs` ok。
+- 打包版（`release/win-unpacked`，隔离数据目录 + `--user-data-dir` 隔离）跑 `ANTEROS_SMOKE_VIEW=admin` + `ANTEROS_SMOKE_TAB=表达与完全体`，用真实数据快照：面板文本含「关系台账」「完全体」「亲密度」，`rendererLogs` 无异常（修复前是整页白屏）。
+- **未验证**：群回复是否真的落到群里（需要真实群消息触发，见 24.3）。
+
+### 24.3 仍需你在真机上确认的事
+
+1. 在群里 @它 说一句话，看回复是否出现在**这个群**里（而不是私聊）。
+2. 切到私聊看历史，确认群里说的话不再出现在私聊里。
