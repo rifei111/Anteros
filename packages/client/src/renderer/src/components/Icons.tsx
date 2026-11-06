@@ -33,6 +33,15 @@ export function GearIcon({ size = 16 }: IconProps) {
   );
 }
 
+export function MicIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="9" y="3" width="6" height="11" rx="3" {...strokeProps} />
+      <path d="M5 11a7 7 0 0 0 14 0M12 18v3" {...strokeProps} />
+    </svg>
+  );
+}
+
 export function SendIcon({ size = 16 }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">

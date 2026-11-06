@@ -1,24 +1,78 @@
 {
   "id": "core.media",
-  "name": "媒体能力（占位）",
-  "version": "0.1.0",
+  "name": "语音能力",
+  "version": "0.3.0",
   "kernel_api": ">=1.0 <2.0",
   "kind": "media",
-  "description": "语音与图片能力的适配层。v0.1 未接入任何媒体供应商：未配置时返回 blocked，已配置也明确说明未实现，绝不假成功。",
+  "description": "语音合成默认走 BreezeBlue（Breeze TTS 2），也可以切回任意 OpenAI 兼容服务；语音识别始终走 OpenAI 兼容的 /v1/audio/transcriptions。未配置密钥时明确返回 blocked，绝不假成功。",
   "entry": { "command": "index.mjs", "args": [] },
-  "capabilities": ["media.speak", "media.image"],
-  "permissions": ["kernel.config", "secrets.read:media.api_key"],
+  "capabilities": ["media.speak", "media.listen", "media.voices", "media.image"],
+  "permissions": ["kernel.config", "secrets.read:media.api_key", "secrets.read:breeze.api_key"],
   "risk_level": "medium",
   "enabled": true,
-  "secrets": ["media.api_key"],
-  "resources": { "max_memory_mb": 256, "max_cpu_pct": 10, "call_timeout_ms": 90000 },
-  "healthcheck": { "method": "plugin.health.check", "interval_ms": 30000, "timeout_ms": 5000 },
+  "secrets": ["breeze.api_key", "media.api_key"],
+  "optional_secrets": ["breeze.api_key", "media.api_key"],
+  "resources": { "max_memory_mb": 256, "max_cpu_pct": 20, "call_timeout_ms": 120000 },
+  "healthcheck": { "method": "plugin.health.check", "interval_ms": 60000, "timeout_ms": 20000 },
   "config_schema": {
     "type": "object",
     "properties": {
-      "provider": { "type": "string", "enum": ["openai", "azure-openai", "local"], "description": "媒体服务类型；v0.1 均未接入" },
-      "speakModel": { "type": "string", "description": "TTS 模型名" },
-      "imageModel": { "type": "string", "description": "图片生成模型名" }
+      "provider": {
+        "type": "string",
+        "default": "breezeblue",
+        "description": "合成走哪家：breezeblue（默认，Breeze TTS 2）或 openai（任何 OpenAI 兼容的 /v1/audio/speech）"
+      },
+      "breezeBaseUrl": {
+        "type": "string",
+        "default": "https://api.breeze.blue",
+        "description": "BreezeBlue 服务地址。可以带 /v1，插件会自己剥掉再拼，不会拼成 /v1/v1。"
+      },
+      "breezeTtsModel": {
+        "type": "string",
+        "default": "breeze-tts-2",
+        "description": "BreezeBlue 合成模型（GET /v1/models 可列，当前是 breeze-tts-2）"
+      },
+      "breezeVoiceId": {
+        "type": "string",
+        "description": "BreezeBlue 音色 ID（voc_...）。留空时插件会去 /v1/voices 自动挑一个中文音色；想固定音色就在这里填。"
+      },
+      "breezeLanguage": {
+        "type": "string",
+        "default": "zh",
+        "description": "自动挑选音色时用的语言代码（ISO 639-1），默认 zh"
+      },
+      "breezeGuidanceScale": {
+        "type": "number",
+        "default": 4,
+        "description": "BreezeBlue 的 guidance_scale（1.0–10.0）：越高校验越贴近语气指令，越低越松散"
+      },
+      "breezeInstructions": {
+        "type": "string",
+        "description": "额外的语气指令（英文效果最好）。插件已经会按情绪自动生成一段，这里填的内容追加在后面。"
+      },
+      "baseUrl": {
+        "type": "string",
+        "description": "OpenAI 兼容服务地址（识别用，或 provider=openai 时的合成用）。可带 /v1，插件会自己剥掉。"
+      },
+      "ttsModel": { "type": "string", "description": "provider=openai 时的合成模型（如 tts-1 / gpt-4o-mini-tts）" },
+      "asrModel": { "type": "string", "description": "语音识别模型（如 whisper-1）。BreezeBlue 没有识别接口，这里要另配一家。" },
+      "voice": { "type": "string", "description": "provider=openai 时的音色名" },
+      "rate": { "type": "number", "description": "默认语速倍数，0.5–2.0；内核会按情绪再微调" },
+      "maxSeconds": { "type": "number", "description": "单条语音时长上限（秒）" },
+      "asrTimeoutMs": { "type": "number", "description": "单条语音转写超时（毫秒），默认 10000；超时由内核回一句「没听清」" },
+      "pricePerMillionCharsCny": {
+        "type": "number",
+        "default": 216,
+        "description": "按字计价的合成单价（元/百万字）。BreezeBlue 官方价 $30 / 100 万字符 ≈ ¥216：预检按它算，才不会让预算闸对语音失效。"
+      },
+      "pricePerSecondCny": {
+        "type": "number",
+        "description": "按秒计价的合成单价（元/秒），provider=openai 时手填；填 0 表示不按秒算"
+      },
+      "pricePerMinuteCny": {
+        "type": "number",
+        "description": "每分钟转写的价格（元），手填；用来做入站预算预检"
+      }
     }
   }
 }

@@ -252,6 +252,15 @@ export function ProactiveTab() {
         )}
       </Section>
 
+      <Section title="为什么现在不发" hint="每 30 秒判定一次；这里记的是最近一次被什么挡住，用来回答「一条主动消息都没收到」。">
+        <p className="muted">
+          {summary?.blockedBy ? `最近一次判定被挡住：${summary.blockedBy}` : "最近一次判定没被挡：已经排进队列，或在等隔离窗口。"}
+        </p>
+        <p className="muted">
+          {`想开口要有由头：想你 ${formatPercent(drives?.longing ?? 0)}、闷 ${formatPercent(drives?.loneliness ?? 0)}（陌生人阶段要 ≥45%）；或者有没聊完的话题、今天有节气/节日。`}
+        </p>
+      </Section>
+
       <Section title="待发动作" hint={`${pending.length} 条在队列里；到点才能发，不会提前。`}>
         <LoadingLine loading={loaded.loading} error={loaded.error} />
         {pending.length > 0 ? (

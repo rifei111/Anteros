@@ -24,6 +24,15 @@ function missingGrantsOf(plugin: PluginInfo): string[] {
   return grantableOf(plugin).filter((item) => !plugin.granted.includes(item));
 }
 
+/**
+ * 密钥状态只由下面「缺密钥 / 密钥已录入」一行表达。
+ * 内核 `issues` 里还挂着注册期的「另有 N 项可选密钥…」与 `host.ts` 重算出来的
+ * 「可选密钥未录入…」——两者来自不同时刻的快照，会跟真实密钥库打架，这里一律让位。
+ */
+function visibleIssues(plugin: PluginInfo): string[] {
+  return plugin.issues.filter((issue) => !issue.includes("密钥"));
+}
+
 function riskClass(risk: PluginInfo["riskLevel"]): string {
   switch (risk) {
     case "low":
@@ -343,7 +352,7 @@ export function PluginsTab() {
 
         {!isOwner ? <div className="banner banner-info">只有 owner 能改插件；这里是只读视图。</div> : null}
 
-        <table className="data-table">
+        <table className="data-table plugin-table">
           <thead>
             <tr>
               <th>插件</th>
@@ -373,8 +382,8 @@ export function PluginsTab() {
                         {plugin.id} · v{plugin.version} · {PLUGIN_KIND_LABEL[plugin.kind] ?? plugin.kind}
                       </div>
                       <div className="table-sub">{plugin.description}</div>
-                      {plugin.issues.length > 0 ? (
-                        <div className="table-sub danger-text">{plugin.issues.join("；")}</div>
+                      {visibleIssues(plugin).length > 0 ? (
+                        <div className="table-sub danger-text">{visibleIssues(plugin).join("；")}</div>
                       ) : null}
                       {plugin.missingSecrets.length > 0 ? (
                         <div className="table-sub danger-text">
@@ -528,7 +537,7 @@ export function PluginsTab() {
         >
           <p className="prose muted">只勾你真愿意让它碰的。没勾的权限它运行时会被拦截。</p>
           <p className="danger-text">
-            标红的项会让它碰进程内存、密钥、磁盘写入或前台窗口——这些不是聊天必需项，按需勾选。
+            标红的项会让它碰进程内存、密钥、磁盘写入或前台窗口。这些不是聊天必需项，按需勾选。
           </p>
           <ul className="bullet-list">
             {grantableOf(grantTarget).map((item) => {

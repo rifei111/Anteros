@@ -8,7 +8,7 @@
  * 单机闭环里没有推送通道，发不出去就退化成本机通知（core.tray-notify 插件负责）。
  */
 import { ACTION_QUARANTINE_MS } from "@anteros/shared";
-import type { ActionItem, ProactiveSummary } from "@anteros/shared";
+import type { ActionItem, DriveState, ProactiveSummary } from "@anteros/shared";
 import type { ChatDeps, KernelDeps } from "../contracts.js";
 import type { SettingsService } from "../settings.js";
 import type { ConsentService } from "./consent.js";
@@ -20,7 +20,8 @@ import type { CostService } from "./cost.js";
  * 不认识任何具体通道的名字。
  */
 export interface RelayPort {
-  deliver: (text: string) => Promise<{ ok: boolean; error?: string }>;
+  /** 按气泡逐条发：一条气泡就是对方那边的一条消息，不合并成长段。 */
+  deliver: (texts: string[]) => Promise<{ ok: boolean; error?: string }>;
   enabled: () => boolean;
   ready: () => boolean;
 }
@@ -36,11 +37,19 @@ const LEVEL_INTERVAL_MS: Record<ProactiveLevel, number> = {
 const DAILY_CAP: Record<ProactiveLevel, number> = { off: 0, low: 2, normal: 4, high: 6 };
 const QUIET_FROM_HOUR = 23;
 const QUIET_TO_HOUR = 8;
+/**
+ * 冷启动（关系还是"陌生人"）时不搞"首周一票否决"——那样新用户永远收不到一条主动消息。
+ * 改成有条件破冰：聊够 3 句、静了 3 小时、今天还没主动过、而且它自己确实有点想你/有点闷。
+ */
+const STRANGER_BREAK_IN_MS = 3 * 3_600_000;
+const STRANGER_BREAK_IN_DRIVE = 0.45;
 
 export class ProactiveService {
   private timer: NodeJS.Timeout | null = null;
   private pending: { timer: NodeJS.Timeout } | null = null;
   private ticking = false;
+  /** 最近一次判定被什么挡住：给「主动消息」页显示，避免"一条没发也不知道为什么"。 */
+  private lastBlockReason: string | null = null;
   /** 主动消息的第二个出口（外部通道）：由 app.ts 注入，没注入就只发在应用里。 */
   private relay: RelayPort | null = null;
 
@@ -129,6 +138,7 @@ export class ProactiveService {
       lastDeliveredTs: last?.ts ?? null,
       relayToExternal: this.relay?.enabled() === true,
       externalReady: this.relay?.ready() === true,
+      blockedBy: this.lastBlockReason,
     };
   }
 
@@ -157,18 +167,23 @@ export class ProactiveService {
     this.ports.emit("event.drives", { drives });
 
     if (!force) {
-      if (!this.passesGate0(now, level, world.presence)) return blocked("被静默时段 / 频控 / 当日上限 / 关系阶段挡住（勾「强制」可越过）");
+      const blockedBy = this.gate0(now, level, world.presence, drives);
+      this.lastBlockReason = blockedBy;
+      if (blockedBy !== null) return blocked(`${blockedBy}（勾「强制」可以越过这道闸）`);
     } else if (world.presence === "sleep") {
       return blocked("它正在睡觉（在场状态 sleep）；勾在这里也不叫醒它，换个时间或先把手机会话打开");
     }
 
     const candidates = this.ports.mind.candidateActions(now);
-    if (candidates.length === 0) {
-      return blocked("没有可用的主动理由：记忆里还没有未闭合话题，也没有今天的时间锚点");
+    // 强制模式必须给得出结果：没有自然理由时用它的内部状态造一个由头，方便端到端自检。
+    const action = candidates[0] ?? (force ? this.breakInCandidate(now, drives) : null);
+    if (action === null) {
+      this.lastBlockReason = "没有可用的主动理由（驱动没到阈值，也没有未闭合话题/时间锚点）";
+      return blocked(this.lastBlockReason);
     }
-    const action = candidates[0]!;
     const actionId = this.enqueue(action, now);
     if (actionId === null) return blocked("刚排过一条同类动作（同一分钟内只排一次），等一分钟再试");
+    this.lastBlockReason = null;
     const payload = (action.payload ?? {}) as Record<string, unknown>;
     const reason = typeof payload.reason === "string" ? payload.reason : action.kind;
     return { queued: true, actionId, reason, blockedBy: null };
@@ -190,13 +205,24 @@ export class ProactiveService {
       this.recordHazardSample(now, world.presence, drives);
 
       const level = this.getLevel();
-      if (level === "off") return;
-      if (!this.passesGate0(now, level, world.presence)) return;
+      if (level === "off") {
+        this.lastBlockReason = "档位是「关闭」";
+        return;
+      }
+      const blockedBy = this.gate0(now, level, world.presence, drives);
+      this.lastBlockReason = blockedBy;
+      if (blockedBy !== null) return;
 
       const candidates = this.ports.mind.candidateActions(now);
-      if (candidates.length === 0) return;
-      const action = candidates[0]!;
-      this.enqueue(action, now);
+      // 冷启动破冰：候选为空（驱动还没越阈、也没未闭合话题）时，用它自己的"想你/闷"给一个由头，
+      // 否则新用户永远等不到第一条主动消息。
+      const action = candidates[0] ?? (this.boatsBreakInAllowed(now) ? this.breakInCandidate(now, drives) : null);
+      if (action === null) {
+        this.lastBlockReason = "没有可用的主动理由（驱动没到阈值，也没有未闭合话题/时间锚点）";
+        return;
+      }
+      const actionId = this.enqueue(action, now);
+      if (actionId !== null) this.lastBlockReason = null;
     } catch (err) {
       this.deps.log.warn(`proactive tick failed: ${(err as Error).message}`);
     } finally {
@@ -204,19 +230,24 @@ export class ProactiveService {
     }
   }
 
-  /** Gate0：静默时段、频控、关系阶段、在场状态，一条不过就不出手。 */
-  private passesGate0(now: number, level: ProactiveLevel, presence: string): boolean {
+  /**
+   * Gate0：静默时段、频控、关系阶段、在场状态，一条不过就不出手。
+   * 返回 null 表示放行；返回一句话表示被什么挡住（会显示在「主动消息」页）。
+   */
+  private gate0(now: number, level: ProactiveLevel, presence: string, drives: DriveState): string | null {
     const hour = Number(
       new Intl.DateTimeFormat("en-US", { hour: "2-digit", hour12: false, timeZone: this.deps.tz }).format(new Date(now)),
     );
-    if (hour >= QUIET_FROM_HOUR || hour < QUIET_TO_HOUR) return false;
-    if (presence === "sleep" || presence === "busy") return false;
+    if (hour >= QUIET_FROM_HOUR || hour < QUIET_TO_HOUR) return `静默时段（${QUIET_FROM_HOUR}:00–${QUIET_TO_HOUR}:00）`;
+    if (presence === "sleep" || presence === "busy") return `在场状态是 ${presence}`;
 
     const last = this.deps.db.get<{ ts: number }>(
       "SELECT ts FROM messages WHERE agent_id = ? AND role = 'agent' AND turn_id IS NOT NULL ORDER BY ts DESC LIMIT 1",
       [this.deps.agentId],
     );
-    if (last && now - last.ts < LEVEL_INTERVAL_MS[level]) return false;
+    if (last && now - last.ts < LEVEL_INTERVAL_MS[level]) {
+      return `距它上次说话还不到 ${Math.round(LEVEL_INTERVAL_MS[level] / 60_000)} 分钟`;
+    }
 
     const startOfDay = new Date(now);
     startOfDay.setHours(0, 0, 0, 0);
@@ -224,11 +255,57 @@ export class ProactiveService {
       "SELECT COUNT(*) AS count FROM turns WHERE agent_id = ? AND trigger IN ('proactive','impulse') AND created_ts >= ?",
       [this.deps.agentId, startOfDay.getTime()],
     );
-    if ((sentToday?.count ?? 0) >= DAILY_CAP[level]) return false;
+    if ((sentToday?.count ?? 0) >= DAILY_CAP[level]) return `今天的主动额度用完了（${DAILY_CAP[level]} 条）`;
 
     const relation = this.ports.mind.getRelation();
-    if (relation.stage === "stranger") return false; // 新好友首周不主动，冷启动期先不谈
+    if (relation.stage !== "stranger") return null;
+
+    // 冷启动阶段：不是一票否决，而是"够熟到可以试探性开口"才放行。
+    const stats = this.deps.db.get<{ n: number; ts: number | null }>(
+      "SELECT COUNT(*) AS n, MAX(ts) AS ts FROM messages WHERE agent_id = ? AND role = 'user'",
+      [this.deps.agentId],
+    );
+    if ((stats?.n ?? 0) < 3) return "还在冷启动：你还没跟它说够三句话";
+    if (stats?.ts !== null && stats?.ts !== undefined && now - stats.ts < STRANGER_BREAK_IN_MS) {
+      return "陌生人阶段：距你上次说话还不到 3 小时";
+    }
+    if ((sentToday?.count ?? 0) >= 1) return "陌生人阶段每天最多主动一次";
+    const miss = Math.max(drives.loneliness, drives.longing);
+    if (miss < STRANGER_BREAK_IN_DRIVE) {
+      return `陌生人阶段：它还没那么想你（想你 ${drives.longing.toFixed(2)} / 闷 ${drives.loneliness.toFixed(2)}，要到 ${STRANGER_BREAK_IN_DRIVE}）`;
+    }
+    return null;
+  }
+
+  /** 冷启动破冰是否已经在闸门上放行（gate0 已经做过同样的判断）。 */
+  private boatsBreakInAllowed(now: number): boolean {
+    const relation = this.ports.mind.getRelation();
+    if (relation.stage !== "stranger") return false;
+    const stats = this.deps.db.get<{ n: number; ts: number | null }>(
+      "SELECT COUNT(*) AS n, MAX(ts) AS ts FROM messages WHERE agent_id = ? AND role = 'user'",
+      [this.deps.agentId],
+    );
+    if ((stats?.n ?? 0) < 3) return false;
+    if (stats?.ts !== null && stats?.ts !== undefined && now - stats.ts < STRANGER_BREAK_IN_MS) return false;
     return true;
+  }
+
+  /** 破冰由头：只用内部状态，不编任何外部事实。 */
+  private breakInCandidate(now: number, drives: DriveState): ActionItem {
+    const hint =
+      drives.longing >= drives.loneliness
+        ? "有点想这个人了，可以轻轻问一句近况（别刻意提旧事，就是单纯想问）"
+        : "有点闷，想找人说句话，不用解释理由";
+    return {
+      id: 0,
+      kind: "proactive",
+      payload: { reason: "state_change", drive: drives.longing >= drives.loneliness ? "longing" : "loneliness", hint, reason_text: hint },
+      createdTs: now,
+      deadlineTs: now + 2 * 3_600_000,
+      ttlMs: 2 * 3_600_000,
+      state: "queued",
+      reason: "state_change",
+    };
   }
 
   /** 隔离窗口：0.5–2s 内用户说话就取消，避免"刚打完字它先开口"。 */
@@ -330,10 +407,12 @@ export class ProactiveService {
       // 出口二选一：只发在应用里，或同时同步到用户指定的外部会话（默认关，由注入方决定开不开）。
       const relay = this.relay;
       if (relay && relay.enabled()) {
-        const text = plan.parts.map((item) => item.text).join("\n").trim();
-        if (text.length > 0) {
+        const texts = plan.parts
+          .map((item) => item.text.trim())
+          .filter((item) => item.length > 0);
+        if (texts.length > 0) {
           void relay
-            .deliver(text)
+            .deliver(texts)
             .then((result) => {
               this.ports.emit("event.proactive", {
                 state: result.ok ? "relayed" : "relay-failed",

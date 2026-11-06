@@ -427,7 +427,7 @@ export function PersonaTab() {
     <div className="panel-stack">
       <Section
         title="头像"
-        hint="聊天页里她的头像。选一张本地图片，存在本机数据库里（不上传）。"
+        hint="只存在本机数据库里，不上传。你自己的消息不显示头像，那是聊天窗，不是名片。"
         action={
           <div className="row-actions">
             <label className={editable ? "btn" : "btn btn-disabled"}>
@@ -454,9 +454,7 @@ export function PersonaTab() {
           ) : (
             <div className="avatar-preview-fallback">{persona.name.slice(0, 1)}</div>
           )}
-          <p className="prose muted">
-            建议正方形、512px 以内；太大的图会被拒（超过约 1.5MB）。你自己的消息不显示头像——那是聊天窗，不是名片。
-          </p>
+          <p className="prose muted">建议正方形、512px 以内；超过 1.5MB 会被拒。</p>
         </div>
       </Section>
 

@@ -14,11 +14,13 @@ import type {
   MemoryItem,
   MemoryKind,
   MemorySearchResult,
+  MessageAttachment,
   Persona,
   PersonaBlueprint,
   PresenceState,
   RelationStage,
   RelationState,
+  VoiceOption,
   WorldState,
 } from "@anteros/shared";
 import type { Db } from "./db/database.js";
@@ -74,6 +76,8 @@ export interface MindPort {
   observeUserTurn(text: string, now: number): RelationState;
   observeAgentTurn(text: string, now: number): RelationState;
   setMode(mode: AgentMode): RelationState;
+  /** 阶段真的迁移时回调（用于把新阶段推给界面；不注册就只在下次拉快照时才更新）。 */
+  setRelationChangeHandler(handler: ((relation: RelationState) => void) | null): void;
 
   /** 世界时钟 */
   getWorld(now: number): WorldState;
@@ -149,6 +153,11 @@ export interface LlmResult {
   text: string;
   model: string;
   usage: { inputTokens: number; outputTokens: number };
+  /**
+   * 上游给的 finish_reason（`stop`/`length`/`content_filter`…）。
+   * `length` 表示输出被 max_tokens 截断——JSON 类调用靠它判断"是不是没写完"，别把截断当成格式错。
+   */
+  finishReason?: string;
 }
 export interface LlmPort {
   generate(input: {
@@ -156,7 +165,7 @@ export interface LlmPort {
     temperature?: number;
     maxTokens?: number;
     json?: boolean;
-    purpose?: "reply" | "proactive" | "extract" | "world" | "narrative" | "persona";
+    purpose?: "reply" | "proactive" | "extract" | "world" | "narrative" | "persona" | "speech";
     /** 多模型：本次指定用的模型（地址/模型名/密钥）；不传就走主模型 */
     override?: { baseUrl: string; model: string; apiKey: string };
   }): Promise<LlmResult>;
@@ -182,6 +191,16 @@ export interface PlannedPart {
   delayAfterMs: number;
   /** 这一条"打字"用多久（毫秒）：字数 / (4~6 字每秒) */
   typingMs: number;
+  /**
+   * 这一条它想用声音说出来（模型在原文里用 `<voice>…</voice>` 标出来的，v1.0.29）。
+   * 它自己决定哪句话值得出声——而不是由档位替它决定整条回复。
+   */
+  voice?: boolean;
+  /**
+   * 这一句它想用声音说、但觉得现在不是时候：`<voice wait>…</voice>`（v1.0.34）。
+   * 这一轮不打字也不出声，存进"待发语音槽"，等对方回了再摆到它面前。
+   */
+  hold?: boolean;
 }
 
 export interface ReplyPlan {
@@ -208,6 +227,11 @@ export interface ExpressionPort {
     conversation?: string;
     /** 允许它自己决定「这次不回」：群聊里不想接就不接 */
     silenceAllowed?: boolean;
+    /**
+     * 上一轮它留着没说出口的那句话（`<voice wait>` 标的）。
+     * 只递到它面前，发不发仍由它自己决定（v1.0.34）。
+     */
+    heldVoice?: string;
   }): Promise<ReplyPlan>;
   /** 只装配上下文，不调用模型（回放与调试用） */
   assemble(input: {
@@ -230,6 +254,8 @@ export interface PluginHostPort {
   secret(pluginId: string, name: string): string | null;
   shutdown(): Promise<void>;
   panicStop(): Promise<{ stopped: string[]; restored: boolean; message: string }>;
+  /** 调插件方法（语音合成/识别走这里；权限与超时由插件宿主统一管） */
+  call(pluginId: string, method: string, params: unknown, opts?: { timeoutMs?: number }): Promise<unknown>;
 }
 
 export interface ChatDeps {
@@ -239,16 +265,76 @@ export interface ChatDeps {
   expression: ExpressionPort;
   llm: LlmPort;
   pluginHost: PluginHostPort;
+  /** 语音条（docs/语音条.md）：收/转写/合成/attachment 读写都在它里面 */
+  media: MediaPort;
   /** 事件推送（内核 → 客户端） */
   emit: (method: string, params: unknown) => void;
   /** 成本记账 */
   recordCost: (input: { agentId: number; kind: string; model: string; usage: { inputTokens: number; outputTokens: number } }) => void;
 }
 
+/** 合成时一起交给插件的情绪快照：BreezeBlue 这类支持"语气指令"的供应商靠它出声。 */
+export interface SpeechMood {
+  arousal: number;
+  valence: number;
+  energy: number;
+  warmth: number;
+}
+
+/** 语音条端口：ChatService 只依赖这几个方法，实现见 services/media.ts。 */
+export interface MediaPort {
+  /** 把客户端刚上传的录音转正，返回可落库的 attachment */
+  bindUpload(uploadId: string): MessageAttachment;
+  /** 临时气泡正文（`[语音 12″]`），模板在 shared 里只有一份 */
+  placeholderFor(att: MessageAttachment): string;
+  /** 转写一条语音消息；成功时消息正文由调用方改写 */
+  transcribe(messageId: number): Promise<{ ok: true; text: string; silent: boolean } | { ok: false; reason: string }>;
+  /** 合成一段语音；失败抛错，调用方要把它变成 skipped 而不是让整轮失败 */
+  synthesize(input: {
+    text: string;
+    rate?: number;
+    volume?: number;
+    cacheKey?: string;
+    mood?: SpeechMood;
+    /** mp3 给应用内播放器；wav 给外部通道（旁路进程要直接喂 waveOut） */
+    format?: "mp3" | "wav";
+  }): Promise<{ attachment: MessageAttachment; costCny: number }>;
+  status(): { listenReady: boolean; speakReady: boolean; message: string; asrAffordable: boolean; voiceOutbound: "off" | "auto" | "always" };
+  readAttachment(messageId: number): MessageAttachment | null;
+  /** attachment 的相对路径 → 绝对路径（外部通道要把文件交给旁路进程播放） */
+  absPathFor(attachment: MessageAttachment): string;
+  writeAttachment(messageId: number, att: MessageAttachment): void;
+  patchAttachment(messageId: number, patch: Partial<MessageAttachment>): MessageAttachment | null;
+  /** 语音单价（元/秒），预检用；插件没配就是 0 */
+  speakPricePerSecond(): number;
+  /** 语音单价（元/百万字符），按字计价的供应商用；插件没配就是 0 */
+  speakPricePerMillionChars(): number;
+  /** 出站预检上限：两种计价口径取大者（文档 10.6，预检必须排在朗读稿改写之前） */
+  speakCeilingCny(text: string, rate: number): number;
+  /** 这笔钱花下去会不会越过本月预算 */
+  affordable(costCny: number): boolean;
+  /** 列可用音色（管理面板「声音」）；只读、不计费 */
+  voices(): Promise<{ ok: boolean; provider: string; voices: VoiceOption[]; message?: string }>;
+  /** 试听一句：不进对话、不落消息表，成本照实记账 */
+  preview(text: string): Promise<{
+    ok: boolean;
+    audioBase64?: string;
+    mime?: string;
+    durMs?: number;
+    costCny?: number;
+    reason?: string;
+  }>;
+}
+
 export interface ChatReplyResult {
   turnId: number;
   userMessage: ChatMessage;
   accepted: boolean;
+  /**
+   * 外部通道要发出去的语音条：一句一条（用户 2026-11-04：长话不要拼成一条，拆成一句一句直接发）。
+   * 合成失败/没合成的那句由调用方退回发文字——绝不因为语音坏了把话弄丢。
+   */
+  voices?: Array<{ index: number; messageId: number; path: string; durMs: number }>;
 }
 
 export { RelationStage };

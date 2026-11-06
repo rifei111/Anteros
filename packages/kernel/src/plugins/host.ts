@@ -242,6 +242,7 @@ const METHOD_CAPABILITY: Readonly<Record<string, Capability | null>> = {
   "plugin.extract.memory": "extract.memory",
   "plugin.world.info": "world.info",
   "plugin.media.speak": "media.speak",
+  "plugin.media.listen": "media.listen",
   "plugin.media.image": "media.image",
   "plugin.ui.panel.render": "ui.panel",
 };
@@ -421,7 +422,9 @@ export class PluginHost implements PluginHostPort {
         config: {},
         health: null,
         secrets: [],
+        optionalSecrets: [],
         missingSecrets: [],
+        presentSecrets: [],
         issues: invalid.issues,
       });
     }
@@ -442,7 +445,7 @@ export class PluginHost implements PluginHostPort {
 
     const verdict = await this.canEnable(manifest, {
       grants: this.grants.list(pluginId),
-      missingSecrets: manifest.secrets.filter((name) => !this.secrets.has(pluginId, name)),
+      missingSecrets: manifest.requiredSecrets.filter((name) => !this.secrets.has(pluginId, name)),
       consent: await this.ports.consent.check(),
       runtime: {
         required: manifest.runtimeEnv === true,
@@ -1254,6 +1257,8 @@ export class PluginHost implements PluginHostPort {
         status: result.status,
         message: result.message,
         checkedTs: Date.now(),
+        // 媒体插件靠这一项告诉内核「能听 / 能说」；丢掉它，界面就永远显示语音不可用。
+        ...(result.attachments ? { attachments: result.attachments } : {}),
       };
       rt.lastHealth = health;
       this.update(id, { health: JSON.stringify(health) });
@@ -1432,10 +1437,14 @@ export class PluginHost implements PluginHostPort {
     const manifest = info?.manifest;
     const issued = info?.issues ?? [];
     // 密钥问题是"现在就能改"的活状态：每次读都按密钥库重算，别把注册时那句过期的提示一直挂着。
-    const missingSecrets = (manifest?.secrets ?? []).filter((name) => !this.secrets.has(row.id, name));
+    const missingSecrets = (manifest?.requiredSecrets ?? []).filter((name) => !this.secrets.has(row.id, name));
+    const missingOptional = (manifest?.optionalSecrets ?? []).filter((name) => !this.secrets.has(row.id, name));
     const stale = parseJson<string[]>(row.issues, []).filter((issue) => !issue.includes("项密钥"));
     if (missingSecrets.length > 0) {
       stale.push(`需要 ${missingSecrets.length} 项密钥（未录入会导致 blocked）：${missingSecrets.join("、")}`);
+    }
+    if (missingOptional.length > 0) {
+      stale.push(`可选密钥未录入（只影响对应能力）：${missingOptional.join("、")}`);
     }
     const issues = unique([
       ...stale,
@@ -1466,7 +1475,9 @@ export class PluginHost implements PluginHostPort {
       config: parseJson<Record<string, unknown>>(row.config, {}),
       health: parseJson<PluginHealth | null>(row.health, null),
       secrets: [...(manifest?.secrets ?? [])],
+      optionalSecrets: [...(manifest?.optionalSecrets ?? [])],
       missingSecrets,
+      presentSecrets: [...(manifest?.secrets ?? [])].filter((name) => this.secrets.has(row.id, name)),
       runtimeEnv: manifest?.runtimeEnv === true,
       issues,
       ...(row.last_error === null ? {} : { lastError: row.last_error }),

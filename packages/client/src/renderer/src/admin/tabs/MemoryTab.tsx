@@ -1,7 +1,7 @@
 import type { Importance, MemoryItem, MemoryKind } from "@anteros/shared";
 import { useEffect, useRef, useState } from "react";
 import { useConfirm } from "../../components/Modal";
-import { formatDateTime, formatPercent, formatRelative, truncate } from "../../lib/format";
+import { conversationLabel, formatDateTime, formatPercent, formatRelative, truncate } from "../../lib/format";
 import { invoke, revealFile } from "../../lib/kernel";
 import { focusMemory, reloadChatView, refreshSnapshot } from "../../lib/app";
 import { IMPORTANCE_LABEL, KIND_LABEL, labelOf } from "../../lib/labels";
@@ -36,6 +36,7 @@ function memoryTitle(item: MemoryItem): string {
 export function MemoryTab() {
   const confirm = useConfirm();
   const stats = useLoad(() => invoke("memory.stats", {}), []);
+  const held = useLoad(() => invoke("voice.held", {}), []);
   const [kind, setKind] = useState<"all" | MemoryKind>("all");
   const [importance, setImportance] = useState<"all" | Importance>("all");
   const [query, setQuery] = useState("");
@@ -145,7 +146,7 @@ export function MemoryTab() {
           <p>
             {clearChatOnDelete
               ? "同时清空聊天记录（推荐：只删记忆的话，它会从聊天记录里重新想起这些事）。"
-              : "保留聊天记录——它仍然会从对话上下文里想起这些事。"}
+              : "保留聊天记录：它仍然会从对话上下文里想起这些事。"}
           </p>
           <p className="danger-text">这个操作不可撤销，删除数量由内核返回。</p>
         </div>
@@ -245,6 +246,50 @@ export function MemoryTab() {
             </div>
           </div>
         ) : null}
+      </Section>
+
+      <Section
+        title="留着没说出口的话"
+        hint="它想用声音说、但觉得当时不是时候的那句（<voice wait>）。对方回话后系统会把它摆到它面前，说不说由它自己定；攒太久会作废。"
+        action={
+          <button className="btn btn-ghost" onClick={() => void held.reload()}>
+            刷新
+          </button>
+        }
+      >
+        <LoadingLine loading={held.loading} error={held.error} />
+        {(held.data?.items ?? []).length === 0 ? (
+          <p className="muted">现在没有攒着的话。</p>
+        ) : (
+          <div className="panel-stack">
+            {(held.data?.items ?? []).map((item) => (
+              <div className="row-between" key={item.conversation}>
+                <div>
+                  <div>{item.text}</div>
+                  <div className="muted">
+                    {conversationLabel(item.conversation)} · 记于 {formatRelative(item.ts)} · 已经摆到它面前 {item.seen} 次
+                  </div>
+                </div>
+                <button
+                  className="btn btn-ghost"
+                  onClick={() => {
+                    void (async () => {
+                      try {
+                        await invoke("voice.held.clear", { conversation: item.conversation });
+                        pushToast("success", "已清掉这句话");
+                        held.reload();
+                      } catch (error) {
+                        reportError(error);
+                      }
+                    })();
+                  }}
+                >
+                  清掉
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </Section>
 
       <Section

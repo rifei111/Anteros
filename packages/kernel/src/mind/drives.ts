@@ -27,14 +27,21 @@ export const DRIVE_NAMES: readonly DriveName[] = [
 ];
 
 /** 与 bootstrap.ts 的 seed 值一致（rate/decay/threshold 来源：草案 12.2 表）。 */
+/**
+ * 参数的版本号：改了下面任何 rate/decay 就 +1，旧库里存的参数会被忽略、按新默认重算。
+ * 起因：原来 7 个驱动里有 5 个的稳态值是 rate/(rate+decay) < threshold，
+ * 意味着它们**永远不可能越阈**——驱动算了等于没算，主动消息自然一条也出不来。
+ */
+export const DRIVE_PARAMS_VERSION = 2;
+
 export const DRIVE_DEFAULTS: Record<DriveName, DriveParams> = {
   loneliness: { rate: 0.06, decay: 0.02, threshold: 0.65, coupling: { boredom: 0.12, longing: 0.2 } },
-  boredom: { rate: 0.05, decay: 0.03, threshold: 0.7, coupling: { loneliness: 0.1 } },
+  boredom: { rate: 0.08, decay: 0.02, threshold: 0.7, coupling: { loneliness: 0.1 } },
   longing: { rate: 0.04, decay: 0.015, threshold: 0.6, coupling: { loneliness: 0.25, urgeToShare: 0.2 } },
-  tension: { rate: 0.03, decay: 0.05, threshold: 0.7, coupling: { anxiety: 0.15 } },
-  fatigue: { rate: 0.02, decay: 0.08, threshold: 0.75, coupling: { anxiety: 0.08, tension: 0.05 } },
-  urgeToShare: { rate: 0.05, decay: 0.04, threshold: 0.6, coupling: { loneliness: 0.15, longing: 0.2 } },
-  anxiety: { rate: 0.02, decay: 0.06, threshold: 0.8, coupling: { tension: 0.15, fatigue: 0.1 } },
+  tension: { rate: 0.06, decay: 0.02, threshold: 0.7, coupling: { anxiety: 0.15 } },
+  fatigue: { rate: 0.07, decay: 0.02, threshold: 0.75, coupling: { anxiety: 0.08, tension: 0.05 } },
+  urgeToShare: { rate: 0.07, decay: 0.03, threshold: 0.6, coupling: { loneliness: 0.15, longing: 0.2 } },
+  anxiety: { rate: 0.1, decay: 0.02, threshold: 0.8, coupling: { tension: 0.15, fatigue: 0.1 } },
 };
 
 /** DB 列名 → DriveName（order 固定，便于测试）。 */
@@ -78,10 +85,12 @@ export function emptyDrives(now: number): DriveState {
 function parseParams(raw: string | null | undefined): Record<string, DriveParams> {
   const merged: Record<string, DriveParams> = {};
   for (const name of DRIVE_NAMES) merged[name] = { ...DRIVE_DEFAULTS[name] };
-  if (!raw) return merged;
+  if (!raw) return withVersion(merged);
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null) return merged;
+    if (typeof parsed !== "object" || parsed === null) return withVersion(merged);
+    // 参数版本不匹配：旧库里存的那套参数直接作废，按新默认值来（否则用户升级后还是永远不会越阈）
+    if ((parsed as { __version?: unknown }).__version !== DRIVE_PARAMS_VERSION) return withVersion(merged);
     for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
       if (typeof value !== "object" || value === null) continue;
       const params = value as Partial<DriveParams>;
@@ -94,9 +103,14 @@ function parseParams(raw: string | null | undefined): Record<string, DriveParams
       };
     }
   } catch {
-    return merged;
+    return withVersion(merged);
   }
-  return merged;
+  return withVersion(merged);
+}
+
+/** 把版本号一起写进参数字典，下次读库时用来判断要不要作废旧值。 */
+function withVersion(params: Record<string, DriveParams>): Record<string, DriveParams> {
+  return Object.assign(params, { __version: DRIVE_PARAMS_VERSION }) as unknown as Record<string, DriveParams>;
 }
 
 function valueOf(drives: DriveState, name: DriveName): number {

@@ -15,6 +15,13 @@ export function formatDateTime(ts: number | null | undefined): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${formatClock(ts)}`;
 }
 
+/** 会话线的中文名：本机会话 / 外部通道的某个人或某个群。 */
+export function conversationLabel(id: string): string {
+  if (id.length === 0 || id === "app") return "本机会话";
+  const rest = id.startsWith("wechat:") ? id.slice("wechat:".length) : id;
+  return rest.length > 0 ? `外部通道 · ${rest}` : "外部通道";
+}
+
 /** 日期分隔：今天 / 昨天 / YYYY-MM-DD */
 export function formatDayLabel(ts: number): string {
   const date = new Date(ts);

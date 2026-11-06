@@ -384,7 +384,7 @@ export function deriveBlueprintFromText(text: string, current: Persona): Persona
 }
 
 /** 给模型的编译 prompt：只许读人设、按结构输出，不许自创区间外的数。 */
-export function blueprintPrompt(text: string, current: Persona): { system: string; user: string } {
+export function blueprintPrompt(text: string, current: Persona, compact = false): { system: string; user: string } {
   const system = [
     "你在把人写的一段人设描述，翻译成一个聊天智能体的「人格参数」。",
     "规则：",
@@ -392,6 +392,8 @@ export function blueprintPrompt(text: string, current: Persona): { system: strin
     "2. 所有数值必须落在给定区间内，越界会被系统钳住。",
     "3. 口头禅只能从原文里摘取（引号里的话），不许你生成。",
     "4. 只输出一个 JSON 对象，不要解释、不要 Markdown 代码块。",
+    // 输出被截断时下游拿到的就是半个 JSON，这是"解析失败"最常见的原因（2026-11-04 用户反馈）。
+    "5. 输出要短：background 不超过 200 字，rationale 最多 6 条、每条 why 不超过 20 字。",
     "",
     "JSON 结构：",
     "{",
@@ -411,7 +413,15 @@ export function blueprintPrompt(text: string, current: Persona): { system: strin
     "参数含义：memoryD 越大越健忘；memoryTau 越接近 -5 越需要提示才想得起来；",
     "memoryS 越大回忆越随机；reconstructRho 越大越会记混细节；emotionGain 越大情绪越浓；",
     "delayMedianMs 是打字延迟中位数；burstMin/burstMax 是每次回复拆成几条。",
-  ].join("\n");
+  ];
+  if (compact) {
+    system.push(
+      "",
+      "这一次格外注意：上一次的输出没能用（不是 JSON、或者被长度上限截断了）。",
+      "这次只输出 JSON 本身：background 不超过 120 字，rationale 最多 3 条、每条 why 不超过 12 字，",
+      "数组最多 3 项，不要换行缩进，不要任何解释文字。",
+    );
+  }
 
   const user = [
     "用户写的人设：",
@@ -420,7 +430,7 @@ export function blueprintPrompt(text: string, current: Persona): { system: strin
     `当前人格（没写到的部分可以沿用）：${JSON.stringify({ name: current.name, city: current.city, interests: current.interests })}`,
   ].join("\n");
 
-  return { system, user };
+  return { system: system.join("\n"), user };
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -433,18 +443,100 @@ function asStringArray(value: unknown, limit: number): string[] {
     : [];
 }
 
+/**
+ * 模型输出的 JSON 修复：不指望模型每次都规规矩矩。
+ * 处理过的情况（都真见过）：Markdown 代码围栏、前后夹解释文字、尾逗号、
+ * 中文引号/冒号被写进结构、整体用了单引号。
+ */
+export function repairJsonText(raw: string): string {
+  let text = raw.replace(/^\uFEFF/, "").trim();
+  text = text.replace(/```[a-zA-Z]*/g, "").replace(/```/g, "").trim();
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) text = text.slice(start, end + 1);
+  text = text.replace(/[\u201c\u201d]/g, '"').replace(/\uff1a/g, ":");
+  text = text.replace(/,\s*([}\]])/g, "$1");
+  // 整个对象都用单引号写的（少见但真见过）：键是单引号、值是双引号时不动
+  if (!/"[^"]*"\s*:/.test(text) && /'[^']*'\s*:/.test(text)) text = text.replace(/'/g, '"');
+  return text;
+}
+
+/**
+ * 被截断的 JSON 抢救：从最后一个完整值往回补右括号。
+ * 模型输出被 max_tokens 切在半路时（推理模型尤其常见），JSON.parse 一定会失败；
+ * 与其整份退回规则引擎，不如把已经写出来的部分收下来，剩下的用规则结果填。
+ */
+export function salvageTruncatedJson(text: string): Record<string, unknown> | null {
+  const source = text.trim();
+  if (!source.startsWith("{")) return null;
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  let lastSafe = -1;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === "{" || char === "[") stack.push(char);
+    else if (char === "}" || char === "]") stack.pop();
+    // 一个完整的值/元素结束后是个安全落点：, : { [ 之后或 } ] 之后
+    if (char === "}" || char === "]") lastSafe = index;
+    if (char === ",") lastSafe = index;
+  }
+  let body = inString ? `${source}"` : source;
+  // 末尾是逗号或半个键值对时往回退到最后一个安全落点
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const trial = `${body.replace(/,\s*$/, "")}${stack
+      .slice()
+      .reverse()
+      .map((open) => (open === "{" ? "}" : "]"))
+      .join("")}`;
+    try {
+      const parsed = JSON.parse(trial) as unknown;
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+      return null;
+    } catch {
+      if (lastSafe < 0) return null;
+      body = source.slice(0, lastSafe + 1);
+      return salvageTruncatedJson(body);
+    }
+  }
+  return null;
+}
+
 /** 解析模型输出：字段缺失/类型不对就落到规则结果上，绝不因为一处坏字段整体失败。 */
-export function parseLlmBlueprint(raw: string, fallback: PersonaBlueprint, model: string): PersonaBlueprint {
-  const start = raw.indexOf("{");
-  const end = raw.lastIndexOf("}");
-  if (start < 0 || end <= start) {
+export function parseLlmBlueprint(raw: string, fallback: PersonaBlueprint, model: string, truncated = false): PersonaBlueprint {
+  const text = repairJsonText(raw);
+  if (!text.startsWith("{")) {
     return { ...fallback, warnings: [...fallback.warnings, `模型输出不是 JSON（${model}），已退回本地规则`] };
   }
   let parsed: Record<string, unknown>;
+  let salvagedNote: string | null = null;
   try {
-    parsed = asRecord(JSON.parse(raw.slice(start, end + 1)) as unknown);
+    parsed = asRecord(JSON.parse(text) as unknown);
   } catch {
-    return { ...fallback, warnings: [...fallback.warnings, `模型输出解析失败（${model}），已退回本地规则`] };
+    // 被截断（finish_reason=length）时先抢救：把已经写完的那部分收下，剩下的用规则结果。
+    const salvaged = truncated || !text.endsWith("}") ? salvageTruncatedJson(text) : null;
+    if (salvaged !== null) {
+      parsed = salvaged;
+      salvagedNote = truncated
+        ? `模型输出被长度上限截断（${model}），已按写完的部分解析，剩下用本地规则补`
+        : `模型输出缺了结尾（${model}），已按写完的部分解析，剩下用本地规则补`;
+    } else {
+      // 截断与格式错要分开说：前者是"话没说完"，后者才是"写歪了"
+      const why = truncated ? "模型输出被长度上限截断（话没说完）" : "模型输出解析失败";
+      return { ...fallback, warnings: [...fallback.warnings, `${why}（${model}），已退回本地规则`] };
+    }
   }
 
   const clamped: string[] = [];
@@ -505,7 +597,11 @@ export function parseLlmBlueprint(raw: string, fallback: PersonaBlueprint, model
     traits,
     rationale: rationale.length > 0 ? rationale : fallback.rationale,
     clamped,
-    warnings: fallback.warnings.filter((warning) => !warning.startsWith("模型输出")),
+    // 规则引擎自己的提示保留，模型那条失败原因去掉（这次没有失败，或已写进 salvagedNote）
+    warnings: [
+      ...fallback.warnings.filter((warning) => !warning.startsWith("模型输出")),
+      ...(salvagedNote === null ? [] : [salvagedNote]),
+    ],
   };
 }
 
@@ -532,14 +628,47 @@ export async function compileBlueprint(
         { role: "user", content: prompt.user },
       ],
       temperature: 0.3,
-      maxTokens: 900,
+      // 900 不够：这个结构里有 background + 最多 20 条 rationale，中文写满就会被截断，
+      // 截断后 JSON 少了右括号，于是看起来像"解析失败"（用户 2026-11-04 报的就是这个）。
+      maxTokens: 1800,
       json: true,
       purpose: "persona",
     });
-    return {
-      blueprint: parseLlmBlueprint(result.text, fallback, result.model),
-      usage: { model: result.model, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens },
-    };
+    let blueprint = parseLlmBlueprint(result.text, fallback, result.model, result.finishReason === "length");
+    let usage = { model: result.model, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens };
+    // 第一遍不可用（截断或被写歪）就换"更短的输出要求"再试一次，token 预算翻倍。
+    // 截断时即使抢救出了半份，也值得重试一次拿全的——省下的那点钱换不来一份完整人格。
+    if (blueprint.engine !== "llm" || result.finishReason === "length") {
+      const firstParsed = blueprint;
+      log.warn(`persona compile 第一遍不可用（${result.finishReason ?? "格式"}），用紧凑要求重试一次`);
+      const retryPrompt = blueprintPrompt(text, current, true);
+      const retry = await llm.generate({
+        messages: [
+          { role: "system", content: retryPrompt.system },
+          { role: "user", content: retryPrompt.user },
+        ],
+        temperature: 0.2,
+        maxTokens: 3000,
+        json: true,
+        purpose: "persona",
+      });
+      usage = {
+        model: retry.model,
+        inputTokens: usage.inputTokens + retry.usage.inputTokens,
+        outputTokens: usage.outputTokens + retry.usage.outputTokens,
+      };
+      const retried = parseLlmBlueprint(retry.text, fallback, retry.model, retry.finishReason === "length");
+      if (retried.engine === "llm") {
+        blueprint = retried;
+      } else if (firstParsed.engine === "llm") {
+        // 重试也没成，但第一遍抢救出了半份：用那份，别把已经拿到的信息丢了
+        blueprint = {
+          ...firstParsed,
+          warnings: [...firstParsed.warnings, "重试用紧凑要求也没能完整解析，这次用第一次写完的那部分"],
+        };
+      }
+    }
+    return { blueprint, usage };
   } catch (error) {
     log.warn(`persona compile 调用模型失败，退回规则引擎：${error instanceof Error ? error.message : String(error)}`);
     return {

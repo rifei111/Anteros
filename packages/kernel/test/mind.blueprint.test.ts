@@ -14,6 +14,8 @@ import {
   clampTraits,
   deriveBlueprintFromText,
   parseLlmBlueprint,
+  repairJsonText,
+  salvageTruncatedJson,
 } from "../src/mind/blueprint.js";
 
 const basePersona: Persona = {
@@ -114,5 +116,57 @@ describe("parseLlmBlueprint", () => {
     expect(blueprint.traits.memoryD).toBe(TRAIT_BOUNDS.memoryD.max);
     expect(blueprint.traits.burstMax).toBe(TRAIT_BOUNDS.burstMax.max);
     expect(blueprint.clamped.length).toBeGreaterThan(0);
+  });
+
+  it("被长度上限截断时，能救的救回来、救不回的才说「截断」", () => {
+    // 救得回来：已经写完的那部分收下，提示里说清是截断
+    const half = '{"name":"林野","background":"26 岁，在成都做夜班护士",';
+    const salvaged = parseLlmBlueprint(half, fallback, "test-model", true);
+    expect(salvaged.engine).toBe("llm");
+    expect(salvaged.warnings.join("")).toContain("截断");
+    // 救不回来（连 JSON 都没开始）：退回规则，且不把截断说成"格式错"
+    const notJson = parseLlmBlueprint("我觉得她是个温柔的人吧", fallback, "test-model", true);
+    expect(notJson.engine).toBe("rules");
+    expect(notJson.warnings.join("")).toContain("不是 JSON");
+  });
+
+  it("模型自带的 Markdown 围栏、尾逗号、中文引号都能救回来", () => {
+    const raw = [
+      "```json",
+      "{",
+      '  “name”: “林野”,',
+      '  "traits": {"memoryD": 0.52,},',
+      '  "interests": ["雨天", "关东煮",],',
+      "}",
+      "```",
+    ].join("\n");
+    const blueprint = parseLlmBlueprint(raw, fallback, "test-model");
+    expect(blueprint.engine).toBe("llm");
+    expect(blueprint.name).toBe("林野");
+    expect(blueprint.traits.memoryD).toBeCloseTo(0.52, 3);
+    expect(blueprint.interests).toContain("关东煮");
+  });
+
+  it("repairJsonText 只动结构，不动正文里的引号内容", () => {
+    const raw = '```json\n{"name":"林野","background":"她说「算了算了」，不爱争。"}\n```';
+    const repaired = repairJsonText(raw);
+    expect(repaired.startsWith("{")).toBe(true);
+    expect(repaired.endsWith("}")).toBe(true);
+    expect(repaired).toContain("「算了算了」");
+  });
+
+  it("输出被切在半路时，写完的那部分要收下来（不是整份作废）", () => {
+    const half = '{"name":"林野","city":"成都","traits":{"memoryD":0.52,"memoryTau":-5.8},"interests":["雨天","关东煮';
+    const blueprint = parseLlmBlueprint(half, fallback, "test-model", true);
+    expect(blueprint.engine).toBe("llm");
+    expect(blueprint.name).toBe("林野");
+    expect(blueprint.city).toBe("成都");
+    expect(blueprint.traits.memoryD).toBeCloseTo(0.52, 3);
+    expect(blueprint.warnings.join("")).toContain("截断");
+  });
+
+  it("salvageTruncatedJson 补不回来时返回 null，交给上层退回规则", () => {
+    expect(salvageTruncatedJson("我觉得她是个温柔的人")).toBeNull();
+    expect(salvageTruncatedJson("")).toBeNull();
   });
 });

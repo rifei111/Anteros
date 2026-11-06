@@ -30,7 +30,7 @@ describe("traits 采样", () => {
         expect(value, `${key} seed=${seed}`).toBeLessThanOrEqual(max);
       }
       expect(traits.burstMax).toBeGreaterThanOrEqual(2);
-      expect(traits.burstMax).toBeLessThanOrEqual(3);
+      expect(traits.burstMax).toBeLessThanOrEqual(20);
       expect(traits.burstMin).toBe(1);
       expect(traits.mbti).toBeNull();
       expect(validateTraits(traits)).toEqual([]);

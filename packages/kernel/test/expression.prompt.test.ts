@@ -2,7 +2,7 @@
  * 上下文装配与计划产出（规范 2 §2；草案 4.5）：
  *   - 系统段包含人设/关系/时间在场/约束/证据层，且零预置模板（不给例句）；
  *   - messages 是最近对话原文；
- *   - planReply 产出 1–3 条、每条 ≤25 字，并带可回放的 ctxSnapshot。
+ *   - planReply 产出 1–6 条、每条 ≤32 字，并带可回放的 ctxSnapshot。
  */
 import type { LlmPort } from "../src/contracts.js";
 import { describe, expect, it } from "vitest";
@@ -145,7 +145,7 @@ describe("planReply", () => {
       expect(plan.parts.length).toBeLessThanOrEqual(3);
       for (const part of plan.parts) {
         expect(part.text.length).toBeGreaterThan(0);
-        expect(part.text.length).toBeLessThanOrEqual(25);
+        expect(part.text.length).toBeLessThanOrEqual(32);
         expect(part.typingMs).toBeGreaterThan(0);
       }
       expect(plan.fullText.length).toBeGreaterThan(0);

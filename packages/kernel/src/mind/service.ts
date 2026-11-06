@@ -49,6 +49,11 @@ export class MindService implements MindPort {
 
   /* ───────────────────────────── 人格 ───────────────────────────── */
 
+  /** 关系阶段真的迁移时回调（app.ts 用它在界面推 event.relation）。 */
+  setRelationChangeHandler(handler: ((relation: RelationState) => void) | null): void {
+    this.relation.onChange = handler;
+  }
+
   getPersona(): Persona {
     return this.persona.get();
   }

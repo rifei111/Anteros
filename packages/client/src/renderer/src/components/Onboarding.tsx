@@ -83,7 +83,7 @@ export function Onboarding() {
                 ))}
               </div>
               <div className="preset-style">
-                口癖：{preset.persona.speechStyle.habits.slice(0, 3).join("、") || "—"}
+                口癖：{preset.persona.speechStyle.habits.slice(0, 3).join("、") || "无"}
               </div>
             </button>
           ))}

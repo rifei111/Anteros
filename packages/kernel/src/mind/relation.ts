@@ -152,6 +152,13 @@ function countTrigger(log: readonly RelationTransition[], trigger: string): numb
 export class RelationService {
   private readonly db: Db;
 
+  /**
+   * 阶段真的动了之后通知外面（发给客户端）。
+   * 不通知的话，界面上的「关系」会一直停在打开那一刻的值——库里已经变了，画面没变，
+   * 用户看到的就是「关系阶段显示不对」。
+   */
+  onChange: ((relation: RelationState) => void) | null = null;
+
   constructor(private readonly deps: KernelDeps) {
     this.db = deps.db;
   }
@@ -217,7 +224,9 @@ export class RelationService {
     this.db.tx(() => {
       this.db.run("UPDATE relation_state SET mode = ? WHERE agent_id = ?", [mode, this.deps.agentId]);
       this.db.run("UPDATE agents SET mode = ?, state_version = state_version + 1 WHERE id = ?", [mode, this.deps.agentId]);
-      const log = relation.transitionLog.concat([{ from: relation.stage, to: relation.stage, trigger: `mode:${mode}`, ts: Date.now() }]);
+      const log = relation.transitionLog.concat([
+        { from: relation.stage, to: relation.stage, trigger: `mode:${mode}`, ts: Date.now(), kind: "mode" },
+      ]);
       this.db.run("UPDATE relation_state SET transition_log = ? WHERE agent_id = ?", [JSON.stringify(log.slice(-500)), this.deps.agentId]);
     });
     return this.get();
@@ -239,7 +248,9 @@ export class RelationService {
     const delta = EVENT_DELTAS[event];
     const intimacy = clamp(relation.intimacy + delta.intimacy, 0, 1);
     const trust = clamp(relation.trust + delta.trust, 0, 1);
-    const log = relation.transitionLog.concat([{ from: relation.stage, to: relation.stage, trigger, ts: now }]);
+    const log = relation.transitionLog.concat([
+      { from: relation.stage, to: relation.stage, trigger, ts: now, kind: "event" },
+    ]);
     this.db.run("UPDATE relation_state SET intimacy = ?, trust = ?, transition_log = ? WHERE agent_id = ?", [
       intimacy,
       trust,
@@ -265,13 +276,22 @@ export class RelationService {
   }
 
   private writeStage(relation: RelationState, to: RelationStage, reason: string, now: number): RelationState {
-    const log = relation.transitionLog.concat([{ from: relation.stage, to, trigger: reason, ts: now }]);
+    const log = relation.transitionLog.concat([
+      { from: relation.stage, to, trigger: reason, ts: now, kind: "stage" },
+    ]);
     this.db.run(
       "UPDATE relation_state SET stage = ?, since_ts = ?, last_transition_ts = ?, transition_log = ? WHERE agent_id = ?",
       [to, now, now, JSON.stringify(log.slice(-500)), this.deps.agentId],
     );
     this.deps.log.info(`relation: ${relation.stage} → ${to}（${reason}）`);
-    return this.get();
+    const next = this.get();
+    // 推给界面：不然画面上永远停在打开时那个阶段
+    try {
+      this.onChange?.(next);
+    } catch (error) {
+      this.deps.log.warn(`relation onChange 失败（不影响迁移）：${(error as Error)?.message ?? String(error)}`);
+    }
+    return next;
   }
 
   private metrics(relation: RelationState): RelationMetrics {

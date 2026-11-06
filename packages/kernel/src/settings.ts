@@ -27,6 +27,13 @@ export interface SettingsDefaults {
   "wechat.lastCheckTs": number;
   /** 聊天对象头像（data URL；空字符串=用名字首字） */
   "ui.agentAvatar": string;
+  /**
+   * 它什么时候用语音回你（docs/语音条.md 10.1）。
+   * 默认 auto：用户要求"默认接入 BreezeBlue 用语音"，所以配好密钥就该开口；
+   * 但 auto 仍是"看场合"——off 需要用户主动关，always 需要用户主动开。
+   * 音色/语速/单价全在 core.media 插件的 config 里，这里只放这一个开关。
+   */
+  "media.voiceOutbound": "off" | "auto" | "always";
 }
 
 export const DEFAULT_SETTINGS: SettingsDefaults = {
@@ -48,6 +55,7 @@ export const DEFAULT_SETTINGS: SettingsDefaults = {
   "wechat.pythonPath": "",
   "wechat.lastCheckTs": 0,
   "ui.agentAvatar": "",
+  "media.voiceOutbound": "auto",
 };
 
 export class SettingsService {

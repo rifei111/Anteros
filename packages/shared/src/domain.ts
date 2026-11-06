@@ -190,6 +190,14 @@ export interface RelationTransition {
   to: RelationStage;
   trigger: string;
   ts: number;
+  /**
+   * 这条记录是什么：
+   * - `stage` 真正的阶段迁移（from ≠ to）
+   * - `event` 只是一次互动事件（加亲密度/信任，阶段没变）
+   * - `mode` 切换标准/完全体（阶段没变）
+   * 旧数据没有这个字段，界面按 from === to 自行判断。
+   */
+  kind?: "stage" | "event" | "mode";
 }
 
 /** 记忆统一视图：内核向 UI / 插件暴露的脱敏形态。 */
@@ -233,6 +241,34 @@ export type ChatRole = "user" | "agent" | "system";
 
 export type MessageDelivery = "pending" | "sent" | "failed" | "unknown" | "cancelled";
 
+/**
+ * 语音条 = 一条文本消息带一个音频附件，不是新的消息类型（docs/语音条.md 5.1）。
+ * 模型永远只看 `text`：记忆、检索、装配、撤回、搜索的复杂度全挡在这条线以外。
+ */
+export interface MessageAttachment {
+  kind: "audio";
+  /** 内核生成的 media 目录内相对路径，形如 voice/2026-11-01/<hex>.webm。客户端永远不提交路径。 */
+  path: string;
+  mime: string;
+  bytes: number;
+  /** 0 = 尚未测得（出站补丁前、以及出站首播前都是 0）。绝不填估算值。 */
+  durMs: number;
+  /** 24 格 0–1；空数组 = 尚未测得。入站来自 AnalyserNode，出站来自渲染层解码。 */
+  peaks: number[];
+  /** 入站是 ASR 转写；出站是朗读稿（与气泡 text 不同源，通常更长）。 */
+  transcript?: string;
+  /**
+   * 转写结果的性质：asr = 真转出来了；shown = 出站朗读稿；
+   * none = 音频里没有人声（不是失败，别报错）；error = 转写失败（配 error 显示重试）。
+   */
+  transcriptKind?: "asr" | "shown" | "none" | "error";
+  state: "pending" | "ready" | "skipped" | "missing";
+  /** 人话失败原因，界面直接显示；null/缺省表示没问题。 */
+  error?: string | null;
+  /** 插件回报的费用（元）。 */
+  costCny?: number;
+}
+
 export interface ChatMessage {
   id: number;
   role: ChatRole;
@@ -248,6 +284,8 @@ export interface ChatMessage {
   senderName?: string | null;
   /** 群聊：发言者 wxid（用来去重与区分同名的人） */
   senderId?: string | null;
+  /** 语音条附件；纯文本消息为 null。补丁只填这一层，永不改 kind、永不改正文。 */
+  attachment?: MessageAttachment | null;
 }
 
 /** 分条发送计划（规范 1 §4.3）：服务端决定 parts 与间隔，客户端不得自行改。 */
@@ -323,8 +361,16 @@ export interface PluginHealth {
   /**
    * 通道类插件的「真的接上了吗」：能力声明是"它被允许做什么"，
    * 这里是"它现在实际能做什么"。骨架能跑但还没接上第三方通道本体时，write 必须是 false。
+   * 媒体插件用 `listen` / `speak` 两个键声明 ASR / TTS 是否真的可用（语音条 8.3）。
    */
-  attachments?: { read?: boolean; write?: boolean; typing?: boolean; recall?: boolean };
+  attachments?: {
+    read?: boolean;
+    write?: boolean;
+    typing?: boolean;
+    recall?: boolean;
+    listen?: boolean;
+    speak?: boolean;
+  };
 }
 
 export interface PluginInfo {
@@ -352,8 +398,12 @@ export interface PluginInfo {
   health: PluginHealth | null;
   /** manifest 里声明要的密钥名（只给名字，永远不含值） */
   secrets: string[];
+  /** 可选的密钥名：缺了不挡启用，只影响对应能力（比如只做合成时可以不填识别用的 key） */
+  optionalSecrets: string[];
   /** 上面这些密钥里还没录入的（缺了就启用不了） */
   missingSecrets: string[];
+  /** 已经录进密钥库的密钥名（只给名字；界面据此显示「已录入 / 未录入」） */
+  presentSecrets: string[];
   /** 这个插件要不要一份外部运行环境（v0.5：界面按它显示「下载运行环境」） */
   runtimeEnv: boolean;
   /** manifest 校验/运行期问题，人话 */
@@ -483,6 +533,10 @@ export interface WechatChannelStatus {
   /** 主动消息要不要同时发到这个微信会话（默认关：主动消息只在应用里出现） */
 
   relayProactive: boolean;
+  /** 微信里回话时发真语音条（虚拟声卡路线，默认关；要 owner 打开并确认声卡自检通过） */
+  voiceOutbound: boolean;
+  /** 虚拟声卡自检是否通过（能不能把声音送进微信的麦克风） */
+  voiceReady: boolean;
   /** 允许对话的对象列表（默认空，开启后按上限逐个添加） */
   chats: WechatChatTarget[];
   /** 可对话用户数量上限（1–8） */
@@ -522,6 +576,15 @@ export interface ActionItem {
 }
 
 /** 主动消息的可读档位摘要：界面上要"常驻"显示当前档位，不能只在设置页里。 */
+/** 一条会话线的概要：左侧列表用它显示最后一句和时间，而不是每次重启都归零的计数。 */
+export interface ConversationSummary {
+  conversation: string;
+  lastText: string;
+  lastTs: number;
+  lastRole: "user" | "agent" | "system";
+  messageCount: number;
+}
+
 export interface ProactiveSummary {
   level: "off" | "low" | "normal" | "high";
   intervalMinutes: number;
@@ -536,6 +599,8 @@ export interface ProactiveSummary {
   /** 外部通道是否会把主动消息一并推过去（通道层判断，业务层只认这个布尔） */
   relayToExternal: boolean;
   externalReady: boolean;
+  /** 最近一次判定被什么挡住（给界面显示，避免"一条没发也不知道为什么"） */
+  blockedBy?: string | null;
 }
 
 export interface AuditEntry {
@@ -549,7 +614,17 @@ export interface AuditEntry {
 }
 
 /** 记账口径：persona = 人设文本编译（一次性开销，不算进"每条消息边际成本"）。 */
-export type CostKind = "reply" | "proactive" | "impulse" | "extract" | "world" | "embedding" | "persona";
+export type CostKind =
+  | "reply"
+  | "proactive"
+  | "impulse"
+  | "extract"
+  | "world"
+  | "embedding"
+  | "persona"
+  /** 语音合成/识别按秒计价（docs/语音条.md 10.5），和 token 记账分开记 */
+  | "media.tts"
+  | "media.asr";
 
 export interface CostEntry {
   id: number;

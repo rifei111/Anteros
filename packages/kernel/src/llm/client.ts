@@ -11,9 +11,10 @@ import { AnterosError, ERROR_CODES } from "@anteros/shared";
 import type { LlmMessage, LlmPort, LlmResult } from "../contracts.js";
 import type { SettingsService } from "../settings.js";
 import { decryptString, encryptString } from "../util/crypto.js";
+import { stripReasoning } from "./sanitize.js";
 
 interface ChatCompletionResponse {
-  choices?: Array<{ message?: { content?: string | null } }>;
+  choices?: Array<{ message?: { content?: string | null }; finish_reason?: string | null }>;
   model?: string;
   usage?: { prompt_tokens?: number; completion_tokens?: number };
   error?: { message?: string };
@@ -21,6 +22,8 @@ interface ChatCompletionResponse {
 
 export class LlmClient implements LlmPort {
   private lastError: string | null = null;
+  /** 最近一次剥掉的思考过程长度（排查用，不落库）。 */
+  private lastSanitize: { removedChars: number; rawLength: number } | null = null;
 
   constructor(
     private readonly settings: SettingsService,
@@ -104,10 +107,16 @@ export class LlmClient implements LlmPort {
         });
       }
       const data = (await response.json()) as ChatCompletionResponse;
-      const text = (data.choices?.[0]?.message?.content ?? "").trim();
+      const rawText = (data.choices?.[0]?.message?.content ?? "").trim();
+      // 推理模型可能把思维链直接写进 content（还可能是 <think / </think 这种残缺标签），
+      // 必须先剥掉再往下走，否则思考过程会被分条成气泡发出去。
+      const { text, removedChars } = stripReasoning(rawText);
+      if (removedChars > 0) this.lastSanitize = { removedChars, rawLength: rawText.length };
       if (!text) {
-        this.lastError = "模型返回空内容";
-        throw new AnterosError(ERROR_CODES.EIO, "模型返回了空内容", { hint: "稍后重试，或检查模型是否支持当前 max_tokens" });
+        this.lastError = removedChars > 0 ? "模型只返回了思考过程，没有正文" : "模型返回空内容";
+        throw new AnterosError(ERROR_CODES.EIO, this.lastError, {
+          hint: "换个模型或降低推理强度再试；如果一直只有思考过程，说明这个模型的输出格式不兼容",
+        });
       }
       const usage = {
         inputTokens: data.usage?.prompt_tokens ?? 0,
@@ -115,7 +124,10 @@ export class LlmClient implements LlmPort {
       };
       this.settings.setJson("llm.lastOkTs", Date.now());
       this.lastError = null;
-      return { text, model: data.model ?? model, usage };
+      // finish_reason 原样带回去：`length` 说明输出被 max_tokens 截断了，
+      // 调用方（人格草案这类要 JSON 的）据此决定"加长重试"而不是报格式错。
+      const finishReason = data.choices?.[0]?.finish_reason ?? undefined;
+      return { text, model: data.model ?? model, usage, ...(finishReason ? { finishReason } : {}) };
     } catch (err) {
       if (err instanceof AnterosError) throw err;
       const message = err instanceof Error ? err.message : String(err);

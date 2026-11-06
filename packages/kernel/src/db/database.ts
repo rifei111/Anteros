@@ -71,6 +71,18 @@ export class Db {
       }
       this.handle.exec("PRAGMA user_version = 3;");
     }
+    if (current < 4) {
+      // v3 → v4：语音条要挂附件（一条消息最多一个音频）。
+      // 照旧先查 PRAGMA 再 ALTER：重复 ALTER 会 duplicate column，应用直接起不来。
+      const exists = this.get<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages'",
+      );
+      if (exists !== undefined) {
+        const columns = new Set(this.all<{ name: string }>("PRAGMA table_info(messages)").map((column) => column.name));
+        if (!columns.has("attachment")) this.handle.exec("ALTER TABLE messages ADD COLUMN attachment TEXT");
+      }
+      this.handle.exec("PRAGMA user_version = 4;");
+    }
   }
 
   get<T>(sql: string, params: SqlParams = []): T | undefined {

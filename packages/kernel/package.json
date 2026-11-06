@@ -1,6 +1,6 @@
 {
   "name": "@anteros/kernel",
-  "version": "1.0.7",
+  "version": "1.1.1",
   "private": true,
   "type": "module",
   "main": "./dist/kernel.mjs",

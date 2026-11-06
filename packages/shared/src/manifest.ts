@@ -22,6 +22,8 @@ export const CAPABILITIES = [
   "embedding.encode",
   "extract.memory",
   "media.speak",
+  "media.listen",
+  "media.voices",
   "media.image",
   "world.info",
   "ui.panel",
@@ -64,6 +66,11 @@ export const pluginManifestSchema = z.object({
   risk_level: z.enum(RISK_VALUES),
   config_schema: z.record(z.string(), z.unknown()).optional(),
   secrets: z.array(z.string().min(1)).optional(),
+  /**
+   * `secrets` 里可以缺席的那些（v0.3.0 起）。缺了只让对应能力不可用，不挡插件启动。
+   * 典型场景：core.media 的合成与识别来自两家供应商，只填其中一把钥匙也该能出声。
+   */
+  optional_secrets: z.array(z.string().min(1)).optional(),
   /** 声明这个插件需要一份外部运行环境（由用户在内核里点下载安装，v0.5+）。 */
   runtime_env: z.boolean().optional(),
   resources: z
@@ -101,6 +108,10 @@ export interface ParsedPluginManifest {
   riskLevel: PluginRisk;
   configSchema?: Record<string, unknown>;
   secrets: string[];
+  /** `secrets` 的子集：缺席不挡启动，只影响对应能力。 */
+  optionalSecrets: string[];
+  /** 真正会把插件卡在 blocked 的那几把钥匙。 */
+  requiredSecrets: string[];
   resources: { maxMemoryMb?: number; maxCpuPct?: number; callTimeoutMs?: number };
   healthcheck?: { method: string; intervalMs: number; timeoutMs: number };
   minOs?: string;
@@ -168,6 +179,14 @@ export function validateManifest(raw: unknown, options: ValidateManifestOptions)
     if (!data.healthcheck) errors.push("高危插件必须声明 healthcheck（否则无法一键停用与降级）");
   }
 
+  // 可选密钥必须是已声明密钥的子集：否则等于偷偷多要一把钥匙
+  const declaredSecrets = data.secrets ?? [];
+  for (const name of data.optional_secrets ?? []) {
+    if (!declaredSecrets.includes(name)) {
+      errors.push(`optional_secrets 里的 ${name} 没有出现在 secrets 里（拼错了？）`);
+    }
+  }
+
   // 通道插件声明写能力时，必须同时声明租约能力
   if (data.capabilities.includes("channel.write") && !data.capabilities.includes("channel.lease")) {
     errors.push("声明 channel.write 的插件必须同时声明 channel.lease（写动作必须持租约）");
@@ -199,7 +218,9 @@ export function validateManifest(raw: unknown, options: ValidateManifestOptions)
       permissions: data.permissions,
       riskLevel: data.risk_level,
       configSchema: data.config_schema,
-      secrets: data.secrets ?? [],
+      secrets: declaredSecrets,
+      optionalSecrets: (data.optional_secrets ?? []).filter((name) => declaredSecrets.includes(name)),
+      requiredSecrets: declaredSecrets.filter((name) => !(data.optional_secrets ?? []).includes(name)),
       resources: {
         maxMemoryMb: data.resources?.max_memory_mb,
         maxCpuPct: data.resources?.max_cpu_pct,

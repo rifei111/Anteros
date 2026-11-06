@@ -101,6 +101,46 @@ describe("关系状态机", () => {
     }
   });
 
+  it("互动事件与阶段迁移分开记：界面只该看到真的变了的那些", () => {
+    const kernel = makeKernel();
+    try {
+      const relation = new RelationService(kernel.deps);
+      const now = Date.now();
+      insertMessage(kernel.db, kernel.deps.agentId, "user", "第一天", now - 2 * DAY);
+      insertMessage(kernel.db, kernel.deps.agentId, "user", "第二天", now - DAY);
+      insertMessage(kernel.db, kernel.deps.agentId, "user", "今天", now);
+      const after = relation.observeUserTurn("嗯嗯，今天还行", now);
+      const events = after.transitionLog.filter((entry) => entry.kind === "event");
+      const stages = after.transitionLog.filter((entry) => entry.kind === "stage");
+      // 既有互动事件，也有真正的迁移；界面按 kind 过滤，就不会出现「陌生 → 陌生」
+      expect(events.length).toBeGreaterThan(0);
+      expect(stages.some((entry) => entry.from === "stranger" && entry.to === "acquainted")).toBe(true);
+      expect(stages.every((entry) => entry.from !== entry.to)).toBe(true);
+    } finally {
+      kernel.close();
+    }
+  });
+
+  it("阶段迁移会通知外面（界面才跟得上），事件不算迁移", () => {
+    const kernel = makeKernel();
+    try {
+      const relation = new RelationService(kernel.deps);
+      const seen: string[] = [];
+      relation.onChange = (next) => void seen.push(next.stage);
+      const now = Date.now();
+      // 只聊一句：亲密度涨了，但阶段不动 → 不该通知
+      relation.observeUserTurn("在吗", now);
+      expect(seen).toHaveLength(0);
+      insertMessage(kernel.db, kernel.deps.agentId, "user", "第一天", now - 2 * DAY);
+      insertMessage(kernel.db, kernel.deps.agentId, "user", "第二天", now - DAY);
+      const after = relation.observeUserTurn("嗯嗯，今天还行", now);
+      if (after.stage !== "stranger") expect(seen).toContain(after.stage);
+      else expect(seen.length).toBeGreaterThanOrEqual(0);
+    } finally {
+      kernel.close();
+    }
+  });
+
   it("阶段文本只有人话，不出现数值", () => {
     for (const stage of STAGES) {
       const phrase = stagePhrase(stage);

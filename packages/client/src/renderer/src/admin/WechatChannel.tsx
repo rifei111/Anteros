@@ -67,6 +67,10 @@ export function WechatChannelPanel() {
   const [testText, setTestText] = useState("");
   const [testBusy, setTestBusy] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; error: string | null; elapsedMs: number } | null>(null);
+  const [voiceBusy, setVoiceBusy] = useState(false);
+  const [voiceSendBusy, setVoiceSendBusy] = useState(false);
+  const [voiceText, setVoiceText] = useState<string>("");
+  const [voiceOk, setVoiceOk] = useState(false);
   const [candidates, setCandidates] = useState<Array<{ username: string; title: string; kind: "direct" | "group"; added: boolean }> | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
 
@@ -300,6 +304,38 @@ export function WechatChannelPanel() {
     }
   };
 
+  /** 自检：把一段声音送进虚拟声卡，看微信那一头能不能录到。打开语音条之前必须先过这一步。 */
+  const checkVoice = async (): Promise<void> => {
+    setVoiceBusy(true);
+    try {
+      const result = await invoke("channels.wechat.voiceStatus", { force: true });
+      setVoiceOk(result.ok);
+      setVoiceText(
+        result.ok
+          ? `自检通过：${result.playbackDevice ?? "虚拟声卡"} → 微信麦克风，电平 ${Math.round(result.rms ?? 0)}`
+          : `自检没过：${result.message ?? "声音送不进微信的麦克风"}`,
+      );
+    } catch (error) {
+      setVoiceOk(false);
+      setVoiceText(error instanceof Error ? error.message : String(error));
+    } finally {
+      setVoiceBusy(false);
+    }
+  };
+
+  const toggleVoiceOutbound = async (enabled: boolean): Promise<void> => {
+    setVoiceSendBusy(true);
+    try {
+      applyStatus(await invoke("channels.wechat.setVoiceOutbound", { enabled }));
+      setVoiceText(enabled ? "打开了：微信里的回复会发成语音条。" : "关了：微信里的回复还是文字。");
+      setVoiceOk(true);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setVoiceSendBusy(false);
+    }
+  };
+
   return (
     <Section
       title="微信（内置通道）"
@@ -530,7 +566,7 @@ export function WechatChannelPanel() {
               </button>
             </div>
             <p className="muted small">
-              默认 <code>filehelper</code> 是「文件传输助手」——最安全：既不会发错人，也能看到它发出来的东西。
+              默认 <code>filehelper</code> 是「文件传输助手」，最安全：既不会发错人，也能看到它发出来的东西。
             </p>
           </div>
 
@@ -642,6 +678,39 @@ export function WechatChannelPanel() {
         ) : (
           <p className="muted small">还没点过"看最近 20 条收发"。</p>
         )}
+      </div>
+    <div className="wechat-block">
+        <div className="wechat-block-title">在微信里发语音条</div>
+        <p className="muted small">
+          打开以后，微信里的回复会发成真语音：Anteros 合成一段音频，播进虚拟声卡（VB-CABLE），
+          再用微信自己的「按住说话」把这段声音当成麦克风输入发出去。不用注入、不碰进程内存。默认关闭。
+        </p>
+        <p className="muted small">
+          前置条件：装了 VB-CABLE，并把 Windows 的默认录音设备设成 CABLE Output。
+          没设对的话微信会录到房间里的真实声音，所以打开之前先点一次自检。
+        </p>
+        <div className="row-gap">
+          <button className="btn btn-ghost" onClick={() => void checkVoice()} disabled={voiceBusy}>
+            {voiceBusy ? "自检中…" : "自检：声音能不能送进微信"}
+          </button>
+          <label className="check-inline">
+            <input
+              type="checkbox"
+              checked={status?.voiceOutbound === true}
+              disabled={voiceSendBusy || status?.state !== "ready"}
+              onChange={(event) => void toggleVoiceOutbound(event.target.checked)}
+            />
+            微信里回话发语音条
+          </label>
+        </div>
+        <p className="muted small">
+          {status?.state === "ready"
+            ? status.voiceOutbound
+              ? "现在是开着的：下一条回复会尝试发语音，语音没合成成功就退回发文字。"
+              : "现在是关着的。"
+            : "通道没就绪：先把上面的通道开起来。"}
+        </p>
+        {voiceText ? <p className={voiceOk ? "small wechat-test-ok" : "small wechat-test-bad"}>{voiceText}</p> : null}
       </div>
     </Section>
   );

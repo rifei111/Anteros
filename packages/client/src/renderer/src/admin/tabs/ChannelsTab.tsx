@@ -109,7 +109,7 @@ export function ChannelsTab() {
                   <dt>写确定性</dt>
                   <dd>{caps.writeIsDeterministic ? "确定（发出去就是发出去）" : "不确定（可能失败或重复）"}</dd>
                   <dt>真实 typing</dt>
-                  <dd>{caps.typingIsReal ? "有真实输入状态" : "没有——所以不会假装正在输入"}</dd>
+                  <dd>{caps.typingIsReal ? "有真实输入状态" : "没有，所以不会假装正在输入"}</dd>
                   <dt>可撤回</dt>
                   <dd>{caps.canRecall ? "可以" : "不可以"}</dd>
                   <dt>宿主占用</dt>

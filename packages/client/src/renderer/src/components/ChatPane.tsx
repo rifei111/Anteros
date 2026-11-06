@@ -12,12 +12,10 @@ import { formatClock, formatDayLabel, shouldShowTimestamp, truncate } from "../l
 import {
   PRESENCE_LABEL,
   PRESENCE_TONE,
-  RELATION_STAGE_LABEL,
   labelOf,
 } from "../lib/labels";
 import { useAppState } from "../lib/store";
 import { Bubble } from "./Bubble";
-import { MemoryStrip } from "./MemoryStrip";
 import { Composer } from "./Composer";
 import { GearIcon } from "./Icons";
 
@@ -34,6 +32,23 @@ const PROACTIVE_LEVEL_TEXT: Record<ProactiveSummary["level"], string> = {
   normal: "正常",
   high: "高",
 };
+
+/**
+ * 插件 id → 用户嘴里的那件事。界面上不出现 `core.media` 这种内部名字，
+ * 也不原样贴 reason（那是给插件页看的东西）。
+ */
+const CAPABILITY_NAME: Record<string, string> = {
+  "core.media": "语音",
+  "core.llm-router": "模型路由",
+  "core.memory-extract": "记忆归纳",
+  "core.tray-notify": "托盘提醒",
+  "core.world-info": "世界信息",
+  "core.dashboard": "面板",
+};
+
+function degradedNames(list: { pluginId: string }[]): string[] {
+  return [...new Set(list.map((item) => CAPABILITY_NAME[item.pluginId] ?? "一项功能"))];
+}
 
 function messageText(message: ChatMessage): string {
   return message.text.replace(/^(> .*\n)+/, "").trim();
@@ -113,25 +128,26 @@ export function ChatPane() {
   const nodes: ReactNode[] = [];
   let previousTs: number | null = null;
   let previousDay = "";
+  let previousRole = "";
+  let previousSender = "";
 
   for (const message of state.messages) {
     const day = formatDayLabel(message.ts);
-    if (day !== previousDay) {
+    const dayChanged = day !== previousDay;
+    let broken = dayChanged;
+    // 换天时把日期和首条消息的时间合成一行「昨天 22:49」，不叠两层分隔线
+    if (dayChanged || shouldShowTimestamp(previousTs, message.ts)) {
+      const clock = formatClock(message.ts);
       nodes.push(
-        <div className="day-sep" key={`day-${day}-${message.id}`}>
-          {day}
+        <div className={dayChanged ? "day-sep" : "time-sep"} key={`sep-${message.id}`}>
+          {dayChanged ? `${day} ${clock}` : clock}
         </div>,
       );
-      previousDay = day;
-      previousTs = null;
+      broken = true;
     }
-    if (shouldShowTimestamp(previousTs, message.ts)) {
-      nodes.push(
-        <div className="time-sep" key={`time-${message.id}`}>
-          {formatClock(message.ts)}
-        </div>,
-      );
-    }
+    previousDay = day;
+    // 同一个人的连续几条只画一次头像，读起来才像一段话而不是一串卡片
+    const sameSender = !broken && previousRole === message.role && previousSender === (message.senderId ?? "");
     nodes.push(
       <Bubble
         key={message.id}
@@ -139,6 +155,7 @@ export function ChatPane() {
         agentName={agentName}
         agentAvatar={state.agentAvatar}
         groupMode={state.activeConversation.includes("@chatroom")}
+        grouped={sameSender}
         onContextMenu={(event, target) =>
           setMenu({
             x: Math.min(event.clientX, globalThis.innerWidth - 160),
@@ -152,10 +169,11 @@ export function ChatPane() {
       />,
     );
     previousTs = message.ts;
+    previousRole = message.role;
+    previousSender = message.senderId ?? "";
   }
 
   const presence = state.world?.presence ?? null;
-  const stage = state.relation?.stage ?? null;
   const typing = state.stream?.typing === true;
   const plannedMs = state.stream?.plannedMs ?? null;
 
@@ -170,11 +188,11 @@ export function ChatPane() {
         <div className="chat-head-meta">
           <div className="chat-head-name">{agentName}</div>
           <div className="chat-head-sub">
-            <span>{labelOf(RELATION_STAGE_LABEL, stage)}</span>
-            <span className="dot-sep">·</span>
-            <span className={presence ? `presence presence-${PRESENCE_TONE[presence]}` : "presence"}>
+            <span className={presence ? `presence presence-${PRESENCE_TONE[presence]}` : "presence presence-muted"}>
               {presence ? labelOf(PRESENCE_LABEL, presence) : "尚未同步在场状态"}
             </span>
+            <span className="dot-sep">·</span>
+            <span>{state.activeConversation === "app" ? "应用内" : "微信"}</span>
             {state.world?.timeAnchor ? (
               <>
                 <span className="dot-sep">·</span>
@@ -216,9 +234,26 @@ export function ChatPane() {
 
       {state.llm?.degradedLocalEcho ? (
         <div className="banner banner-info">
-          未配置模型：当前回复来自本地回声（演示模式，不产生云端调用）。
+          还没配置模型，现在只能回本地回声（不产生云端调用）。
           <button className="link-btn" onClick={() => openAdmin("model")}>
             去配置
+          </button>
+        </div>
+      ) : null}
+
+      {state.degraded.length > 0 ? (
+        <div className="capability-strip">
+          <span className="capability-mark" aria-hidden="true" />
+          <span className="capability-text">
+            <span className="capability-title">{degradedNames(state.degraded).join("、")}暂时用不了</span>
+            <span className="capability-note">
+              {degradedNames(state.degraded).includes("模型路由")
+                ? "回复可能退回本地回声。"
+                : "文字对话不受影响。"}
+            </span>
+          </span>
+          <button className="link-btn" onClick={() => openAdmin("plugins")}>
+            看原因
           </button>
         </div>
       ) : null}
@@ -247,7 +282,6 @@ export function ChatPane() {
         </div>
       ) : null}
 
-      <MemoryStrip conversation={state.activeConversation} />
 
       <div className="chat-list" ref={listRef} onScroll={onScroll}>
         {state.hasMoreHistory ? (
@@ -289,7 +323,7 @@ export function ChatPane() {
                 <span className="typing-dot" />
                 <span className="typing-dot" />
                 <span className="typing-dot" />
-                <span className="typing-text">正在输入…</span>
+                <span className="typing-text">{state.stream?.transcribing ? "在听你说的话…" : "正在写…"}</span>
               </div>
             </div>
           </div>

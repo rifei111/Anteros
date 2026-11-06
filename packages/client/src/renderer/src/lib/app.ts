@@ -4,7 +4,8 @@
  * 分层的原则：组件只调用这里的函数 + 读 store；这里只调用 `lib/kernel.ts`。
  */
 
-import type { ChatMessage, KernelEvents, MemoryItem } from "@anteros/shared";
+import type { ChatMessage, KernelEvents, MemoryItem, SystemHealth } from "@anteros/shared";
+import { voicePlaceholder } from "@anteros/shared";
 import { humanizeError } from "./errors";
 import { invoke, newEventId, pollConnection, subscribe, appInfo, quitApp } from "./kernel";
 import {
@@ -12,13 +13,19 @@ import {
   applyModelCatalog,
   applyPluginRuntime,
   applyUpdateStatus,
+  applyConversationSummaries,
+  applyDegraded,
   applyWechatChats,
+  bumpConversationUnread,
+  clearConversationUnread,
   getState,
   pushToast,
   setState,
   type AdminTab,
+  type DegradedNotice,
 } from "./store";
 import { truncate } from "./format";
+import { uploadClip, type RecordedClip } from "./voice";
 
 const ONBOARDED_KEY = "anteros.onboarded.v1";
 const HISTORY_PAGE = 40;
@@ -146,6 +153,15 @@ async function resync(): Promise<void> {
   }
 }
 
+/**
+ * 健康状态里哪些算用户看得见的降级：「还没勾声明」是第一跑的预期状态，不当故障。
+ */
+function realDegraded(list: SystemHealth["degraded"]): DegradedNotice[] {
+  return list
+    .filter((item) => !item.reason.includes("同意《用户声明与风险告知》"))
+    .map((item) => ({ pluginId: item.pluginId, reason: item.reason }));
+}
+
 async function loadSnapshot(): Promise<void> {
   const snapshot = await invoke("state.snapshot", {});
   setState({
@@ -165,6 +181,9 @@ async function loadSnapshot(): Promise<void> {
     agentAvatar: snapshot.agentAvatar ?? null,
     proactive: snapshot.proactive ?? null,
   });
+  // 快照里的健康状态与 event.health 是同一份事实：启动时就该显示能力条，
+  // 不能等下一次巡检推送，否则刚进主界面那几十秒像是「一切正常」。
+  applyDegraded(realDegraded(snapshot.health?.degraded ?? []));
   void loadModelCatalog();
 }
 
@@ -188,7 +207,7 @@ export async function refreshSnapshot(): Promise<void> {
 }
 
 async function enterChat(): Promise<void> {
-  await Promise.all([loadHistory(), loadPresets(), loadWechatChats()]);
+  await Promise.all([loadHistory(), loadPresets(), loadWechatChats(), loadConversationSummaries()]);
 
   setState({ phase: "ready", unread: 0 });
   void markReadNow();
@@ -232,7 +251,11 @@ async function loadHistory(): Promise<void> {
 /** 切换会话（应用内 / 某个微信的人或群）：换一条对话线看历史。 */
 export async function switchConversation(key: string): Promise<void> {
   const current = getState().activeConversation;
-  if (current === key) return;
+  if (current === key) {
+    clearConversationUnread(key);
+    return;
+  }
+  clearConversationUnread(key);
   // 先把当前这条线的消息存起来，切回去时不必等内核
   if (getState().messages.length > 0) historyCache.set(current, getState().messages);
   const cached = historyCache.get(key) ?? [];
@@ -241,6 +264,16 @@ export async function switchConversation(key: string): Promise<void> {
 }
 
 /** 拉一次「可对话对象」，聊天页顶部的会话切换器用。 */
+/** 拉每条会话线的摘要（最后一句 + 时间）：左侧列表用它，不受重启影响。 */
+export async function loadConversationSummaries(): Promise<void> {
+  try {
+    const result = await invoke("chat.summaries", {});
+    if (Array.isArray(result.summaries)) applyConversationSummaries(result.summaries);
+  } catch {
+    // 摘要只是列表装饰，失败不影响聊天
+  }
+}
+
 export async function loadWechatChats(): Promise<void> {
   try {
     const status = await invoke("channels.wechat.status", {});
@@ -339,6 +372,16 @@ export async function quitApplication(): Promise<void> {
 /* 事件接线                                                            */
 /* ------------------------------------------------------------------ */
 
+/** 输入框里有没有正在打的字：决定要不要自动切会话。 */
+function isTypingInComposer(): boolean {
+  const active = document.activeElement as HTMLElement | null;
+  if (!active) return false;
+  const tag = active.tagName;
+  if (tag !== "TEXTAREA" && tag !== "INPUT") return false;
+  const value = (active as HTMLTextAreaElement | HTMLInputElement).value ?? "";
+  return value.trim().length > 0;
+}
+
 function wireEvents(): () => void {
   const cleanups: Array<() => void> = [];
 
@@ -356,10 +399,19 @@ function wireEvents(): () => void {
       const channelId = typeof payload?.channelId === "string" ? payload.channelId.trim() : "";
       const key = channelId.length > 0 ? channelId : "app";
       if (key !== getState().activeConversation) {
-        setState((previous) => ({ unread: previous.unread + 1 }));
+        // 未读按会话线记：左侧列表上只有那条线冒红点，不混到当前对话里。
+        bumpConversationUnread(key);
+        // 正在打字时不抢走用户的对话框（"切到别的对话去"比漏看一条更烦）；
+        // 输入框空着（手停了）才自动切过去，并补上这条消息。
+        if (!isTypingInComposer()) {
+          void switchConversation(key).then(() => {
+            if (getState().activeConversation === key) upsertMessage(payload);
+          });
+        }
         return;
       }
       upsertMessage(payload);
+      void loadConversationSummaries();
     }),
   );
 
@@ -379,6 +431,17 @@ function wireEvents(): () => void {
 
   cleanups.push(
     subscribe("event.typing", (payload) => {
+      if (payload.state === "transcribe") {
+        setState((previous) => ({
+          stream: {
+            turnId: previous.stream?.turnId ?? null,
+            typing: true,
+            plannedMs: null,
+            transcribing: true,
+          },
+        }));
+        return;
+      }
       if (payload.state === "start") {
         setState((previous) => ({
           stream: {
@@ -390,7 +453,7 @@ function wireEvents(): () => void {
         return;
       }
       setState((previous) => ({
-        stream: previous.stream ? { ...previous.stream, typing: false, plannedMs: null } : null,
+        stream: previous.stream ? { ...previous.stream, typing: false, plannedMs: null, transcribing: false } : null,
       }));
     }),
   );
@@ -476,27 +539,14 @@ function wireEvents(): () => void {
   );
 
   /**
-   * 插件降级提示：内核在启动/健康检查里会连着发几次 event.health，同一条降级会重复很多遍。
-   * 这里做两件事：①「还没勾声明」是第一跑的预期状态，不当告警；②把 1.5 秒内的多次变化
-   * 合并成一条，并且和上次报过的内容相同就不再弹。
+   * 插件降级不是一次性错误，而是当前的能力状态：写进 store，由聊天页顶部的
+   * 能力条常驻显示。界面只说「哪件事用不了」，`pluginId` 与原始原因留在
+   * 管理面板 · 插件里给需要看的人看。
+   * 「还没勾声明」是第一跑的预期状态，不当降级。
    */
-  let degradeTimer: number | null = null;
-  let degradeShown = "";
-  let degradePending: string[] = [];
   cleanups.push(
     subscribe("event.health", (payload) => {
-      const real = payload.degraded.filter((item) => !item.reason.includes("同意《用户声明与风险告知》"));
-      if (real.length === 0) return;
-      degradePending = real.slice(0, 3).map((item) => `${item.pluginId}：${item.reason}`);
-      if (degradeTimer !== null) window.clearTimeout(degradeTimer);
-      degradeTimer = window.setTimeout(() => {
-        degradeTimer = null;
-        const text = degradePending.join("\n");
-        if (text.length === 0 || text === degradeShown) return;
-        degradeShown = text;
-        const extra = real.length > 3 ? `\n…另有 ${real.length - 3} 个` : "";
-        pushToast("warn", "有插件降级", text + extra);
-      }, 1_500);
+      applyDegraded(realDegraded(payload.degraded));
     }),
   );
 
@@ -599,6 +649,9 @@ export async function sendMessage(rawText: string, quote: ChatMessage | null): P
       eventId,
       clientTs: temp.ts,
       presence: { isTyping: true, appFocused: document.hasFocus() },
+      // 带上当前会话线：不然在别人的对话里打的字会落进应用内那条主线，
+      // 看起来就是「这个对话框里出现了别的对话」。
+      conversation: getState().activeConversation,
     });
     // 临时消息可能已被 event.message 的权威消息「顶替」进列表：先把 tempId 和
     // 真实 id 都摘掉，再补回内核返回的那条，保证任何时刻列表里 id 唯一（否则同一句话两条气泡）。
@@ -625,6 +678,76 @@ export async function sendMessage(rawText: string, quote: ChatMessage | null): P
   }
 }
 
+/**
+ * 发一条语音（文档 7.2）：先上传拿到 uploadId，再让内核把「音频 + 转写」当成一次正常输入。
+ * 临时气泡先按本地时长画出来——录音那一刻就有峰值，不必等内核回声。
+ */
+export async function sendVoice(clip: RecordedClip): Promise<boolean> {
+  const { connection, phase } = getState();
+  if (!connection.connected || phase !== "ready") {
+    pushToast("warn", "内核未连接，暂时无法发送", connection.message);
+    return false;
+  }
+  let uploadId: string;
+  try {
+    uploadId = await uploadClip(clip);
+  } catch (error) {
+    const human = humanizeError(error);
+    pushToast("error", "录音没能送进内核", human.hint ?? human.title);
+    return false;
+  }
+
+  const eventId = newEventId();
+  const tempId = nextTempId();
+  const placeholder = voicePlaceholder({ durMs: clip.durMs });
+  const temp: ChatMessage = {
+    id: tempId,
+    role: "user",
+    text: placeholder,
+    ts: Date.now(),
+    turnId: null,
+    partIndex: null,
+    recalled: false,
+    channelId: "app",
+    delivery: "pending",
+    attachment: {
+      kind: "audio",
+      path: "",
+      mime: clip.mime,
+      bytes: clip.blob.size,
+      durMs: clip.durMs,
+      peaks: clip.peaks,
+      state: "ready",
+    },
+  };
+  setState((previous) => ({ messages: [...previous.messages, temp], stream: null }));
+
+  try {
+    const result = await invoke("chat.send", {
+      text: "",
+      uploadId,
+      eventId,
+      clientTs: temp.ts,
+      presence: { isTyping: false, appFocused: document.hasFocus() },
+      conversation: getState().activeConversation,
+    });
+    setState((previous) => {
+      const rest = previous.messages.filter((item) => item.id !== tempId && item.id !== result.userMessage.id);
+      const messages = [...rest, result.userMessage].sort((left, right) => left.ts - right.ts || left.id - right.id);
+      return { messages };
+    });
+    void markReadNow();
+    return true;
+  } catch (error) {
+    setState((previous) => ({
+      messages: previous.messages.map((item) => (item.id === tempId ? { ...item, delivery: "failed" } : item)),
+    }));
+    const human = humanizeError(error);
+    pushToast("error", human.title, human.hint);
+    return false;
+  }
+}
+
 export async function resendMessage(message: ChatMessage): Promise<void> {
   setState((previous) => ({ messages: previous.messages.filter((item) => item.id !== message.id) }));
   await sendMessage(message.text, null);
@@ -632,6 +755,13 @@ export async function resendMessage(message: ChatMessage): Promise<void> {
 
 export function deleteLocalMessage(message: ChatMessage): void {
   setState((previous) => ({ messages: previous.messages.filter((item) => item.id !== message.id) }));
+}
+
+/** 语音条重新合成成功后，把这一条气泡的 attachment 换成内核给的新值（不重拉整段历史）。 */
+export function applyMessageAttachment(messageId: number, attachment: ChatMessage["attachment"]): void {
+  setState((previous) => ({
+    messages: previous.messages.map((item) => (item.id === messageId ? { ...item, attachment } : item)),
+  }));
 }
 
 export async function loadOlderMessages(): Promise<void> {

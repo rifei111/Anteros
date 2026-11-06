@@ -7,7 +7,16 @@ import type { CostEntry, CostSummary } from "@anteros/shared";
 import type { Db } from "../db/database.js";
 import type { SettingsService } from "../settings.js";
 
-export type CostKind = "reply" | "proactive" | "impulse" | "extract" | "world" | "embedding" | "persona";
+export type CostKind =
+  | "reply"
+  | "proactive"
+  | "impulse"
+  | "extract"
+  | "world"
+  | "embedding"
+  | "persona"
+  | "media.tts"
+  | "media.asr";
 
 interface CostRow {
   id: number;
@@ -55,6 +64,39 @@ export class CostService {
         hint: "在 设置 → 成本 里调整月度预算，或等下月额度重置（成本上限是硬项）",
       });
     }
+  }
+
+  /** 本月已花（公开版，给语音预算预检用：docs/语音条.md 10.5）。 */
+  monthTotal(): number {
+    return this.monthCny();
+  }
+
+  /**
+   * 按秒计价的外部调用（语音合成/识别）：单价由插件给出，这里直接记 cost_cny。
+   * 插件给不出单价时 costCny=0 —— 账可以缺一条，绕过预算闸不行。token 两列记 0。
+   */
+  recordMedia(input: {
+    kind: "media.tts" | "media.asr";
+    model: string;
+    costCny: number;
+    estimated?: boolean;
+    ts?: number;
+  }): CostEntry {
+    const ts = input.ts ?? Date.now();
+    const cost = Number.isFinite(input.costCny) && input.costCny > 0 ? Number(input.costCny.toFixed(6)) : 0;
+    const result = this.db.run(
+      "INSERT INTO cost_ledger(agent_id, ts, kind, model, input_tokens, output_tokens, cost_cny) VALUES (?, ?, ?, ?, 0, 0, ?)",
+      [this.agentId, ts, input.kind, input.model, cost],
+    );
+    return {
+      id: result.lastInsertRowid,
+      ts,
+      kind: input.kind,
+      model: input.model,
+      inputTokens: 0,
+      outputTokens: 0,
+      costCny: cost,
+    };
   }
 
   summary(): CostSummary {

@@ -4,7 +4,7 @@
  * 做的是真事：起一个真内核进程 → 连命名管道 → 走一遍
  *   握手 → 声明闸 → 快照 → 发消息（拿到分条事件）→ 历史 → 成本 → 健康 → 关停。
  *
- * 断言的是 M0c 的硬口径：声明闸没勾选不能发消息、回复必须按 1–3 条 ≤25 字下发、
+ * 断言的是 M0c 的硬口径：声明闸没勾选不能发消息、回复必须按 1–6 条 ≤32 字下发、
  * 插件全部注册成功、内核在 LLM 未配置时必须降级而不是崩。
  *
  * 用法：npm.cmd run build:kernel 之后 `node scripts/smoke-kernel.mjs`
@@ -317,10 +317,10 @@ try {
 
   await waitFor(() => events.some((event) => event.method === "event.typing" && event.params?.state === "stop"), "打字结束事件");
   const parts = events.filter((event) => event.method === "event.part").map((event) => event.params);
-  check("回复按 1–3 条下发", parts.length >= 1 && parts.length <= 3, `parts=${parts.length}`);
+  check("回复按 1–6 条下发", parts.length >= 1 && parts.length <= 6, `parts=${parts.length}`);
   check(
-    "每条不超过 25 字",
-    parts.every((part) => typeof part.text === "string" && part.text.length <= 25),
+    "每条不超过 32 字",
+    parts.every((part) => typeof part.text === "string" && part.text.length <= 32),
     parts.map((part) => part.text.length).join(","),
   );
   check("分条带打字时长与条间间隔", parts.every((part) => part.typingMs >= 0 && part.delayAfterMs >= 0));
@@ -670,7 +670,7 @@ await call("channels.wechat.setChatMode", { username: "12345@chatroom", mode: "a
     "主会话 " + appHistory.messages.length + " 条",
   );
 
-  /* ---- 记忆也按会话分线：群里的记忆不会出现在私聊的记忆列表里 ---- */
+  /* ---- 记忆是一整份：群里说过的事，私聊里也记得（会话线只决定来源，不决定记不记得） ---- */
   const groupMemory = await call("memory.list", { conversation: groupKey, limit: 50 });
   const appMemory = await call("memory.list", { conversation: "app", limit: 50 });
   check(
@@ -679,8 +679,8 @@ await call("channels.wechat.setChatMode", { username: "12345@chatroom", mode: "a
     "群记忆 " + groupMemory.items.length + " 条",
   );
   check(
-    "私聊的记忆列表里看不到群里的记忆",
-    !appMemory.items.some((item) => String(item.text).includes("群里测试一句")),
+    "记忆跨会话共享：私聊里也能看到群里的记忆",
+    appMemory.items.some((item) => String(item.text).includes("群里测试一句")),
     "私聊记忆 " + appMemory.items.length + " 条：" + appMemory.items.map((i) => `${i.channelId}|${String(i.text).slice(0, 20)}`).join(" / "),
   );
   check(

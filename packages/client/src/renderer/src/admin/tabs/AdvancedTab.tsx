@@ -3,6 +3,7 @@ import { useConfirm } from "../../components/Modal";
 import { formatDateTime, formatClock } from "../../lib/format";
 import { invoke } from "../../lib/kernel";
 import { clearLogs, pushToast, useAppState } from "../../lib/store";
+import { THEME_OPTIONS, readThemeChoice, writeThemeChoice, type ThemeChoice } from "../../lib/theme";
 import { LoadingLine, Section, reportError, useLoad } from "../helpers";
 
 const ROLE_LABEL: Record<string, string> = {
@@ -20,7 +21,7 @@ function uptime(ms: number): string {
 }
 
 function shortJson(value: unknown): string {
-  if (value === null || value === undefined) return "—";
+  if (value === null || value === undefined) return "无";
   if (typeof value === "string") return value.length > 80 ? `${value.slice(0, 80)}…` : value;
   try {
     const text = JSON.stringify(value);
@@ -47,6 +48,7 @@ export function AdvancedTab() {
   const audit = useLoad(() => invoke("audit.list", { limit: 50 }), []);
   const [level, setLevel] = useState<"all" | "warn" | "error">("all");
   const [busy, setBusy] = useState(false);
+  const [theme, setTheme] = useState<ThemeChoice>(() => readThemeChoice());
 
   const logs = useMemo(() => {
     const filtered = state.logs.filter((line) => {
@@ -91,6 +93,22 @@ export function AdvancedTab() {
   return (
     <div className="panel-stack">
       {confirm.node}
+
+      <Section title="外观" hint="只影响这支界面怎么显示，不改数据、不碰内核。">
+        <div className="segmented">
+          {THEME_OPTIONS.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              className={`seg-btn ${theme === option.id ? "active" : ""}`}
+              title={option.hint}
+              onClick={() => setTheme(writeThemeChoice(option.id))}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </Section>
 
       <Section
         title="系统健康"
@@ -180,7 +198,7 @@ export function AdvancedTab() {
                   <td className="mono">{formatDateTime(entry.ts)}</td>
                   <td>{ROLE_LABEL[entry.actorRole] ?? entry.actorRole}</td>
                   <td className="mono">{entry.action}</td>
-                  <td>{entry.targetAgentId === null ? "—" : `#${entry.targetAgentId}`}</td>
+                  <td>{entry.targetAgentId === null ? "无" : `#${entry.targetAgentId}`}</td>
                   <td className="mono muted">
                     {shortJson(entry.before)} → {shortJson(entry.after)}
                   </td>

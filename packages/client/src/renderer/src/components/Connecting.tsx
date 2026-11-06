@@ -1,3 +1,4 @@
+import appIcon from "../assets/app-icon.png";
 import { useAppState } from "../lib/store";
 
 /**
@@ -12,7 +13,7 @@ export function Connecting() {
   return (
     <div className="center-screen">
       <div className="center-card">
-        <div className="brand-mark">A</div>
+        <img className="brand-mark" src={appIcon} alt="" />
         <h1 className="brand-title">Anteros</h1>
         <p className="brand-sub">拟人智能体 · Windows 主客户端</p>
 

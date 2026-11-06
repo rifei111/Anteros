@@ -21,6 +21,7 @@ export function ExpressionTab() {
   const relation = state.relation;
   const ledger = useLoad(() => invoke("relation.ledger", { limit: 20 }), []);
   const confirm = useConfirm();
+  const voice = useLoad(() => invoke("media.status", {}), []);
   const [riskOpen, setRiskOpen] = useState(false);
   const [riskChecked, setRiskChecked] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -29,6 +30,10 @@ export function ExpressionTab() {
   // 快照/事件里的关系对象在某些版本里可能没有 transitionLog（旧数据、旧内核），
   // 这里一律兜成空数组：一个字段缺失不该让整个面板白屏。
   const transitionLog = relation?.transitionLog ?? [];
+  // 只显示「阶段真的变了」的那些：早期版本把每次互动都写进这个列表（from === to），
+  // 界面上就出现一串「陌生 → 陌生（agent:turn）」，看起来像阶段显示坏了。
+  // 旧数据没有 kind 字段，按 from !== to 兜底判断。
+  const stageChanges = transitionLog.filter((entry) => (entry.kind ? entry.kind === "stage" : entry.from !== entry.to));
   const ledgerEntries = ledger.data?.entries ?? [];
 
   const switchMode = async (mode: AgentMode): Promise<void> => {
@@ -48,6 +53,16 @@ export function ExpressionTab() {
       reportError(error);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const setVoice = async (mode: "off" | "auto" | "always"): Promise<void> => {
+    try {
+      await invoke("media.setVoiceOutbound", { mode });
+      voice.reload();
+      pushToast("success", "已更新语音回答方式", mode === "off" ? "以后只用文字。" : "会看场合决定要不要开口。");
+    } catch (error) {
+      reportError(error);
     }
   };
 
@@ -117,9 +132,9 @@ export function ExpressionTab() {
           </div>
         </div>
 
-        {transitionLog.length > 0 ? (
+        {stageChanges.length > 0 ? (
           <ul className="bullet-list muted">
-            {transitionLog
+            {stageChanges
               .slice(-8)
               .reverse()
               .map((entry, index) => (
@@ -129,7 +144,34 @@ export function ExpressionTab() {
                 </li>
               ))}
           </ul>
-        ) : null}
+        ) : (
+          <p className="muted">关系还没变过阶段。多聊几天、或者手动切换完全体，这里才会出现记录。</p>
+        )}
+      </Section>
+
+      <Section title="它怎么跟你说话" hint="语音合成默认走 BreezeBlue（插件里填密钥即可）。这一档只决定它会不会开口。">
+        <div className="voice-mode-row">
+          {(
+            [
+              { mode: "off", label: "只用文字" },
+              { mode: "auto", label: "看场合（默认）" },
+              { mode: "always", label: "能开口就开口" },
+            ] as const
+          ).map((item) => (
+            <button
+              key={item.mode}
+              className={`btn btn-sm${voice.data?.voiceOutbound === item.mode ? " btn-primary" : " btn-ghost"}`}
+              onClick={() => void setVoice(item.mode)}
+              disabled={voice.loading}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        <p className="muted">
+          {voice.data?.message ?? "还没读到语音状态。"}
+          {voice.data && !voice.data.speakReady ? "（在「插件」里给 core.media 填好密钥就能出声）" : ""}
+        </p>
       </Section>
 
       <Section title="完全体模式" hint="默认关闭。开启要读风险页并二次确认。">

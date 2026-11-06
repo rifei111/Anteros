@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 /**
  * scripts/validate-plugins.mjs —— 校验 plugins/ 下每个 plugin.json。
  *
@@ -49,8 +49,8 @@ const REQUIRED_BUILTINS = {
     kind: "media",
     risk: "medium",
     enabled: true,
-    capabilities: ["media.speak", "media.image"],
-    permissions: ["kernel.config", "secrets.read:media.api_key"],
+    capabilities: ["media.speak", "media.listen", "media.voices", "media.image"],
+    permissions: ["kernel.config", "secrets.read:media.api_key", "secrets.read:breeze.api_key"],
   },
   "core.world-info": {
     kind: "world",
@@ -90,7 +90,7 @@ const FORBIDDEN_CODE_TOKENS = [
 /** 回退校验用：与 packages/shared/src/manifest.ts 对齐（v0.1）。 */
 const CAPABILITIES = [
   "channel.read", "channel.write", "channel.media", "channel.lease", "channel.history",
-  "llm.generate", "embedding.encode", "extract.memory", "media.speak", "media.image",
+  "llm.generate", "embedding.encode", "extract.memory", "media.speak", "media.listen", "media.voices", "media.image",
   "world.info", "ui.panel", "ops.host",
 ];
 const PLAIN_PERMISSIONS = ["ui.foreground", "kernel.events", "kernel.config"];

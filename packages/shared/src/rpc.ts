@@ -19,6 +19,7 @@ import type {
   WechatChannelStatus,
   ChatMessage,
   ConsentStatus,
+  ConversationSummary,
   CostSummary,
   DriveState,
   HandshakeResult,
@@ -31,6 +32,7 @@ import type {
   MemoryItem,
   MemoryKind,
   MemorySearchResult,
+  MessageAttachment,
   OwnerStatus,
   Persona,
   PersonaBlueprint,
@@ -77,6 +79,20 @@ export interface MethodSpec<P = unknown, R = unknown> {
   result: R;
 }
 
+/**
+ * 一个可选音色（管理面板「声音」里的下拉项）。
+ *
+ * 字段一律可选，供应商能给多少给多少：BreezeBlue 会带 name/language/gender/preview_url，
+ * 别家可能只给一个 id。界面只依赖 id 与显示名。
+ */
+export interface VoiceOption {
+  id: string;
+  name: string;
+  language?: string;
+  gender?: string;
+  previewUrl?: string;
+}
+
 export type Ack = { ack: true };
 
 /* ------------------------------------------------------------------ */
@@ -94,6 +110,8 @@ export interface KernelApi {
     { limit?: number; beforeTs?: number; conversation?: string },
     { messages: ChatMessage[]; hasMore: boolean }
   >;
+  /** 每条会话线的最后一句与条数：左侧列表用它显示摘要（重启也不归零）。 */
+  "chat.summaries": MethodSpec<Record<string, never>, { summaries: ConversationSummary[] }>;
   /** 上行只带 is_typing 布尔值，禁止上报草稿文本（规范 1 §4.1 隐私约束）。 */
   "chat.send": MethodSpec<
     {
@@ -104,11 +122,81 @@ export interface KernelApi {
       /** 会话键：不同的人（或群）各自一条对话线，互不污染上下文 */
       conversation?: string;
       presence?: { isTyping?: boolean; appFocused?: boolean; lastInteractionMs?: number };
+      /**
+       * 语音条：先 media.upload 拿到的 uploadId（**不是路径**，路径由内核生成）。
+       * 内核在这一步把它绑到消息上，uploadId 立刻作废（语言条 5.2）。
+       */
+      uploadId?: string;
     },
-    { turnId: number; userMessage: ChatMessage; accepted: boolean }
+    { turnId: number; userMessage: ChatMessage; accepted: boolean; /** 入站预算预检拒绝时的人话原因（11.2） */ reason?: string }
   >;
   "chat.typing": MethodSpec<{ isTyping: boolean }, Ack>;
   "chat.markRead": MethodSpec<{ lastTs: number }, Ack>;
+
+  /* ---------------- 语音条：五个媒体原语（内核只做这五件事，供应商全在插件里） ---------------- */
+  /** 第一段握手：字节进内核、校验、落盘，返回 uploadId 与内核生成的附件描述。 */
+  "media.upload": MethodSpec<
+    {
+      /** 幂等键：同一次上传重试不该落两个文件 */
+      eventId?: string;
+      dataBase64: string;
+      mime: string;
+      /** 客户端 performance.now() 计时；内核只做范围检查，不做独立校验（7.5） */
+      durMs: number;
+      peaks: number[];
+    },
+    { uploadId: string; attachment: MessageAttachment }
+  >;
+  /** 取字节：只接受 uploadId 或 messageId，**不接受裸路径**（9.3 的 LRU 与重试都走它）。 */
+  "media.load": MethodSpec<
+    { uploadId?: string; messageId?: number },
+    { dataBase64: string; mime: string; durMs: number; transcript?: string }
+  >;
+  /** 只读缓存里的插件健康与预算可负担性，客户端一样都不自己算（9.5 / 10.6）。 */
+  "media.status": MethodSpec<
+    Record<string, never>,
+    {
+      listenReady: boolean;
+      speakReady: boolean;
+      message: string;
+      /** 本月还花得起最坏一笔 ASR 吗（内核用 monthCny() 与预算算） */
+      asrAffordable: boolean;
+      voiceOutbound: "off" | "auto" | "always";
+      /** 没装/没启用/没授权时给"去配置"用的原因 */
+      reason?: string;
+    }
+  >;
+  /** 出站时长的唯一实测来源：渲染层解码后回填（幂等 UPDATE，9.3）。 */
+  "media.meta.set": MethodSpec<{ messageId: number; durMs: number; peaks: number[] }, { attachment: MessageAttachment }>;
+  /** 对没转写成功、或转写成功但没形成回复的语音重跑一次（11.2）。 */
+  "media.retry": MethodSpec<{ messageId: number }, { ok: boolean; text?: string; reason?: string }>;
+  /** 对合成失败（skipped / error / missing）的语音条重新合成一次，成功后直接刷新 attachment。 */
+  "media.respeak": MethodSpec<{ messageId: number }, { ok: boolean; attachment?: MessageAttachment; reason?: string }>;
+  /**
+   * 列出可用音色（管理面板「声音」用）。只读、不计费。
+   *
+   * 供应商把音色藏在账户后面（BreezeBlue 走 GET /v1/voices），所以"选音色"只能是内核去问插件，
+   * 不能让客户端自己拼请求——密钥不出内核。
+   */
+  "media.voices": MethodSpec<Record<string, never>, { ok: boolean; provider: string; voices: VoiceOption[]; message?: string }>;
+  /**
+   * 试听一句：不进对话、不占语音档位、不入消息表，成本照实记账。
+   * 音频直接以 base64 回给客户端播放，省掉一条"预览文件"的落盘与清理路径。
+   */
+  "media.preview": MethodSpec<
+    { text?: string },
+    { ok: boolean; audioBase64?: string; mime?: string; durMs?: number; costCny?: number; reason?: string }
+  >;
+  /** 撤回/GC 之后客户端刷新一条消息的附件状态。 */
+  "media.attachment": MethodSpec<{ messageId: number }, { attachment: MessageAttachment | null }>;
+  /**
+   * 它什么时候用语音回你（10.1）。三档只影响"出站要不要开口"，
+   * 识别/合成的可用性看 media.status 的 listenReady / speakReady。
+   */
+  "media.setVoiceOutbound": MethodSpec<
+    { mode: "off" | "auto" | "always" },
+    { voiceOutbound: "off" | "auto" | "always" }
+  >;
 
   "memory.search": MethodSpec<{ query: string; topK?: number }, MemorySearchResult>;
   "memory.list": MethodSpec<
@@ -131,6 +219,12 @@ export interface KernelApi {
     { episodic: number; semantic: number; openLoops: number; persona: number; pinned: number; total: number }
   >;
   "memory.export": MethodSpec<Record<string, never>, { path: string; bytes: number }>;
+  /**
+   * 它留着没说出口的那句话（`<voice wait>`，v1.0.34）：这一轮没说、等对方回了再决定。
+   * 只给 owner 看，可以手动清掉。
+   */
+  "voice.held": MethodSpec<Record<string, never>, { items: Array<{ conversation: string; text: string; ts: number; seen: number }> }>;
+  "voice.held.clear": MethodSpec<{ conversation: string }, { cleared: boolean }>;
 
   "consent.status": MethodSpec<Record<string, never>, ConsentStatus>;
   "consent.accept": MethodSpec<
@@ -248,6 +342,35 @@ export interface KernelApi {
   "channels.wechat.doctor": MethodSpec<{ action: "dump-account" | "diagnose-keys" }, { ok: boolean; output: string }>;
   /** 主动消息要不要同时同步到这个微信会话（默认关） */
   "channels.wechat.setRelay": MethodSpec<{ enabled: boolean }, WechatChannelStatus>;
+  /** 微信里回话要不要发真语音条（虚拟声卡路线，默认关） */
+  "channels.wechat.setVoiceOutbound": MethodSpec<{ enabled: boolean }, WechatChannelStatus>;
+  /** 虚拟声卡自检：把一段声音送进微信的麦克风，看录回来的电平 */
+  "channels.wechat.voiceStatus": MethodSpec<
+    { force?: boolean },
+    { ok: boolean; playbackDevice?: string; rms?: number; message?: string }
+  >;
+  /** 本机有没有虚拟声卡（VB-CABLE）：只读检测，不弹任何窗口 */
+  "channels.wechat.soundcardStatus": MethodSpec<
+    Record<string, never>,
+    {
+      installed: boolean;
+      /** 回放端名字，例如 CABLE Input (VB-Audio Virtual Cable) */
+      playbackDevice?: string;
+      /** 录音端名字，例如 CABLE Output (VB-Audio Virtual Cable) */
+      captureDevice?: string;
+      /** 驱动包是否随应用一起打包（可以一键装）；为 false 时只能给下载地址 */
+      bundled: boolean;
+      message: string;
+    }
+  >;
+  /**
+   * 一键安装虚拟声卡。会弹一次 UAC（装驱动必须提权），装着的时候要先关掉微信，
+   * 装完需要重启微信与 Anteros 才会认到设备。
+   */
+  "channels.wechat.installSoundcard": MethodSpec<
+    Record<string, never>,
+    { ok: boolean; needsAdmin?: boolean; needsRestart?: boolean; message: string }
+  >;
 
   "world.state": MethodSpec<Record<string, never>, WorldState>;
   "drives.state": MethodSpec<Record<string, never>, DriveState>;
@@ -408,7 +531,16 @@ export interface ChannelInboundMessage {
 
 export interface PluginApi {
   "plugin.describe": MethodSpec<Record<string, never>, { id: string; capabilities: string[] }>;
-  "plugin.health.check": MethodSpec<Record<string, never>, { ok: boolean; status: "ok" | "degraded" | "blocked"; message: string }>;
+  "plugin.health.check": MethodSpec<
+    Record<string, never>,
+    {
+      ok: boolean;
+      status: "ok" | "degraded" | "blocked";
+      message: string;
+      /** 这个插件现在真的能做什么（语音条 8.3：listen/speak 两个布尔是能力的唯一真话） */
+      attachments?: Record<string, boolean>;
+    }
+  >;
   "plugin.llm.generate": MethodSpec<LlmGenerateParams, LlmGenerateResult>;
   "plugin.extract.memory": MethodSpec<
     { texts: Array<{ id: number; text: string; ts: number }> },
@@ -438,6 +570,57 @@ export interface PluginApi {
   "plugin.channel.disable_and_restore": MethodSpec<Record<string, never>, { restored: boolean; detail: string }>;
   "plugin.ui.panel.render": MethodSpec<{ panelId: string }, { title: string; blocks: Array<Record<string, unknown>> }>;
   "plugin.notify.send": MethodSpec<{ title: string; body: string }, { delivered: boolean }>;
+
+  /* ---- 媒体：三个只有插件会做的事（语音条 8.1：TTS/ASR 全部在插件里，内核只做编排） ---- */
+  /** 文字 → 音频字节。内核出站时先预检预算、再调它，返回的 costCny 直接进 cost_ledger。 */
+  "plugin.media.speak": MethodSpec<
+    {
+      text: string;
+      /** 语速倍率（0.5–2.0）：同一个 text 不同 rate 就是不同时长，缓存键必须带上它 */
+      rate?: number;
+      /** 音色 id，空则用插件默认 */
+      voice?: string;
+      /** 缓存键：内核按 (text, rate, voice) 的摘要算好传进来，插件不自己算 */
+      cacheKey?: string;
+    },
+    {
+      dataBase64: string;
+      mime: string;
+      /** 供应商回报的时长；给不出就 0，由渲染层实测回填（9.3） */
+      durMs: number;
+      costCny?: number;
+      model?: string;
+      /** 缓存命中：内核据此跳过记账 */
+      cached?: boolean;
+    }
+  >;
+  /** 音频字节 → 文字。只接受内核递来的本地路径，插件不得自己去找文件。 */
+  "plugin.media.listen": MethodSpec<
+    { path: string; mime: string; durMs: number },
+    {
+      text: string;
+      /** assistant: 转写成功；none: 没人声/无法识别（此时 text 为空，内核用"没听清"）；error: 失败 */
+      kind: "assistant" | "none" | "error";
+      costCny?: number;
+      model?: string;
+      reason?: string;
+    }
+  >;
+  /** 列出这家供应商能给到的音色（管理面板「声音」用）。只读、不计费。 */
+  "plugin.media.voices": MethodSpec<
+    { language?: string },
+    {
+      provider: string;
+      voices: VoiceOption[];
+      /** 列不出来时说清原因（没密钥 / 网络 / 供应商没有这个接口） */
+      message?: string;
+    }
+  >;
+  /** 图片：本期只留签名，未实现（语音条 8.1 明确"顺手做了"以外的都别加） */
+  "plugin.media.image": MethodSpec<
+    { prompt: string; size?: string },
+    { dataBase64: string; mime: string; costCny?: number }
+  >;
 }
 
 /* ------------------------------------------------------------------ */
@@ -474,7 +657,15 @@ export interface PluginHostApi {
 export interface KernelEvents {
   "event.message": ChatMessage;
   "event.part": { turnId: number; index: number; total: number; text: string; delayAfterMs: number; typingMs: number };
-  "event.typing": { state: "start" | "stop"; plannedMs?: number; plannedChars?: number };
+  "event.typing": {
+    /**
+     * start/stop 是"正在写"；transcribe 是"正在听你那条语音"——
+     * ASR 那几秒不能是空窗，否则用户以为消息没发出去（语音条 10.5）。
+     */
+    state: "start" | "stop" | "transcribe";
+    plannedMs?: number;
+    plannedChars?: number;
+  };
   "event.recall": { messageId: number; replacement: string };
   "event.presence": WorldState;
   "event.drives": DriveState;

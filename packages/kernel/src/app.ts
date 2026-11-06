@@ -37,9 +37,16 @@ import { ExportService } from "./services/export.js";
 import { ResetService } from "./services/reset.js";
 import { SystemService } from "./services/system.js";
 import { ChatService } from "./services/chat.js";
+import { VoiceHoldStore } from "./services/voice-hold.js";
+import { MediaService } from "./services/media.js";
 import { ModelService } from "./services/models.js";
 import { ProactiveService } from "./services/proactive.js";
 
+/** 会话摘要只留前 40 个字：左侧列表一行显示得下，也不把长文塞进 RPC。 */
+function truncateForSummary(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length <= 40 ? flat : `${flat.slice(0, 40)}…`;
+}
 export function pipeNameFor(sessionId: string): string {
   const suffix = sessionId.replace(/[^A-Za-z0-9_-]+/g, "").slice(0, 32) || "default";
   return `\\\\.\\pipe\\${PIPE_PREFIX}-${suffix}`;
@@ -86,6 +93,9 @@ export class App {
   private readonly exporter: ExportService;
   private readonly system: SystemService;
   private readonly chat: ChatService;
+  /** 「留着没说出口的那句话」的槽位（`<voice wait>`，v1.0.34） */
+  private readonly voiceHold: VoiceHoldStore;
+  private readonly media: MediaService;
   private readonly proactive: ProactiveService;
   private readonly reset: ResetService;
   private readonly wechat: WechatChannelService;
@@ -109,6 +119,15 @@ export class App {
     this.models = new ModelService(runtime.settings, masterKey, runtime.logger.child("models"));
     this.expression = new ExpressionService(this.deps, this.mind, this.memory, this.llm, this.models);
 
+    // 关系阶段自动迁移时推给界面（application 里这么连；emit 是后赋值的，用箭头惰性取）
+    this.mind.setRelationChangeHandler((relation) => {
+      try {
+        this.emit("event.relation", relation);
+      } catch {
+        /* 界面没连上也别影响迁移 */
+      }
+    });
+
     const pluginsDir = resolvePluginsDir();
     this.plugins = new PluginService(this.deps, runtime.permissions, runtime.audit, runtime.consent, {
       pluginsDir,
@@ -117,6 +136,15 @@ export class App {
     this.channels = new ChannelService(this.deps, this.plugins);
     this.exporter = new ExportService(this.deps, { dataDir: runtime.dataDir });
     this.system = new SystemService(this.deps, { plugins: this.plugins, channels: this.channels });
+    this.media = new MediaService({
+      db: this.deps.db,
+      dataDir: runtime.dataDir,
+      log: runtime.logger.child("media"),
+      plugins: this.plugins,
+      settings: runtime.settings,
+      cost: runtime.cost,
+      agentId: this.deps.agentId,
+    });
     this.reset = new ResetService(this.deps.db, runtime.dataDir, runtime.logger.child("reset"), {
       extraRuntimeDirs: ["wechat-runtime"],
       extraSettingPrefixes: [{ prefix: "wechat.", label: "运行环境" }],
@@ -129,16 +157,28 @@ export class App {
       expression: this.expression,
       llm: this.llm,
       pluginHost: this.pluginHost,
+      media: this.media,
       emit: (method, params) => this.emit(method, params),
       recordCost: (input) =>
         runtime.cost.record({
-          kind: input.kind as "reply" | "proactive" | "impulse" | "extract" | "world" | "embedding",
+          kind: input.kind as "reply" | "proactive" | "impulse" | "extract" | "world" | "embedding" | "media.tts" | "media.asr",
           model: input.model,
           inputTokens: input.usage.inputTokens,
           outputTokens: input.usage.outputTokens,
         }),
     };
-    this.chat = new ChatService({ deps: this.deps, ports, consent: runtime.consent, cost: runtime.cost, audit: runtime.audit });
+    this.voiceHold = new VoiceHoldStore(this.deps.db);
+    this.chat = new ChatService({
+      deps: this.deps,
+      ports,
+      consent: runtime.consent,
+      cost: runtime.cost,
+      audit: runtime.audit,
+      // 业务层只问"外部通道要不要发语音"，通道自己的开关在这里转述（草案 14.14.3）
+      externalVoice: () => this.wechat.status().voiceOutbound === true,
+      // 「留着没说出口的那句话」的槽位（`<voice wait>`）
+      voiceHold: this.voiceHold,
+    });
     this.conversationQueue = new ConversationQueue(this.deps, runtime.settings);
     this.wechat = new WechatChannelService(this.deps, runtime.settings, runtime.audit, runtime.consent, runtime.permissions, {
       emit: (method, params) => this.emit(method, params),
@@ -160,19 +200,112 @@ export class App {
               // 群聊：谁说的要落库、也要进上下文
               author: senderName ? { name: senderName, id: senderId ?? null } : undefined,
               silenceAllowed: decideReply === true,
-              onPart: decideReply === true ? (part) => void buffered.push(part) : (part) => this.wechat.send(part, chatUsername),
+              // 先全都攒着：整段写完再一次发出去。
+              // 边写边发的话，一条回复拆成两条气泡就要打开会话两次（群里能看到搜两次会话）。
+              onPart: (part) => void buffered.push(part),
             });
-            if (decideReply !== true) return;
+            if (buffered.length === 0) return;
             const joined = buffered.join("").replace(/\s+/g, "");
+            if (decideReply === true) {
             // 只认「<不回>」这一种写法，宁可多发一句也不误吞正常回复
-            if (/^[<＜]?不回[>＞]?$/.test(joined)) {
-              // 决定不回：把这条 turn 落库的气泡删掉，界面上不留「<不回>」这种鬼话
-              this.deps.db.run("DELETE FROM messages WHERE turn_id = ?", [result.turnId]);
-              this.deps.log.info(`[wechat] ${chatTitle || chatUsername}：它决定这次不回`);
+              if (/^[<＜]?不回[>＞]?$/.test(joined)) {
+                // 决定不回：把这条 turn 落库的气泡删掉，界面上不留「<不回>」这种鬼话
+                this.deps.db.run("DELETE FROM messages WHERE turn_id = ?", [result.turnId]);
+                this.deps.log.info(`[wechat] ${chatTitle || chatUsername}：它决定这次不回`);
+                return;
+              }
+            }
+            // 发出去之后要看结果：旁路会把「发了 3 条、挂了」当成正常返回，
+            // 以前这里直接丢掉返回值，用户看到的就是「只发了前三句」。
+            // 语音条一句一条（用户 2026-11-04）：标了语音的那几句发语音，其余照常打字，互不吞。
+            const voices = result.voices ?? [];
+            const voiceByIndex = new Map(voices.map((item) => [item.index, item]));
+            const markFailed = (indexes: number[], why: string): void => {
+              if (indexes.length === 0) return;
+              try {
+                const holes = indexes.map(() => "?").join(",");
+                this.deps.db.run(
+                  `UPDATE messages SET delivery = 'failed' WHERE turn_id = ? AND part_index IN (${holes})`,
+                  [result.turnId, ...indexes],
+                );
+                const failed = this.deps.db.all<{ id: number }>(
+                  `SELECT id FROM messages WHERE turn_id = ? AND part_index IN (${holes}) ORDER BY part_index`,
+                  [result.turnId, ...indexes],
+                );
+                for (const row of failed) this.emit("event.message", this.chat.getMessage(row.id));
+              } catch (error) {
+                this.deps.log.warn(`[wechat] 标记失败消息出错：${(error as Error)?.message ?? String(error)}`);
+              }
+              this.deps.log.warn(`[wechat] ${chatTitle || chatUsername}：${why}`);
+            };
+            if (voices.length > 0) {
+              // 按原来的顺序一条条走：文字攒成一批再发（少开几次会话），语音一句一条单独发。
+              let batch: string[] = [];
+              let batchIndexes: number[] = [];
+              const flush = async (): Promise<void> => {
+                if (batch.length === 0) return;
+                const texts = batch.slice();
+                const indexes = batchIndexes.slice();
+                batch = [];
+                batchIndexes = [];
+                const outcome = await this.wechat.sendMany(texts, chatUsername);
+                const sentCount = typeof outcome.sent === "number" ? outcome.sent : texts.length;
+                if (!outcome.ok || sentCount < texts.length) {
+                  // 没发出去的那几条，库里也标成失败：不然界面显示「已发送」，其实对方没收到
+                  markFailed(
+                    indexes.slice(sentCount),
+                    `文字只发出去 ${sentCount}/${texts.length} 条（${outcome.error ?? "旁路没说原因"}）`,
+                  );
+                }
+              };
+              for (let index = 0; index < buffered.length; index += 1) {
+                const item = voiceByIndex.get(index);
+                const text = buffered[index] ?? "";
+                if (!item) {
+                  batch.push(text);
+                  batchIndexes.push(index);
+                  continue;
+                }
+                await flush();
+                const sent = await this.wechat.sendVoice(item.path, item.durMs, chatUsername);
+                if (sent.ok) {
+                  this.deps.log.info(
+                    `[wechat] ${chatTitle || chatUsername}：语音条已发出（第 ${index} 条，${Math.round((sent.voicelength ?? item.durMs) / 100) / 10}s）`,
+                  );
+                  continue;
+                }
+                // 语音没发出去：把这一句的话退回去发文字，绝不因为语音坏了把话弄丢
+                this.deps.log.warn(`[wechat] 语音条没发出去（${sent.error ?? "未知原因"}），这一句退回发文字`);
+                if (text.length === 0) continue;
+                const retry = await this.wechat.sendMany([text], chatUsername);
+                const retrySent = typeof retry.sent === "number" ? retry.sent : 1;
+                if (!retry.ok || retrySent < 1) {
+                  markFailed([index], "这一句的语音和退回的文字都没发出去");
+                }
+              }
+              await flush();
               return;
             }
-            for (const part of buffered) {
-              await this.wechat.sendAsync(part, chatUsername);
+            const outcome = await this.wechat.sendMany(buffered, chatUsername);
+            const sentCount = typeof outcome.sent === "number" ? outcome.sent : buffered.length;
+            if (!outcome.ok || sentCount < buffered.length) {
+              // 没发出去的那几条，库里也标成失败：不然界面显示「已发送」，其实对方没收到
+              try {
+                this.deps.db.run(
+                  "UPDATE messages SET delivery = 'failed' WHERE turn_id = ? AND role = 'agent' AND part_index >= ?",
+                  [result.turnId, sentCount],
+                );
+                const failed = this.deps.db.all<{ id: number }>(
+                  "SELECT id FROM messages WHERE turn_id = ? AND role = 'agent' AND delivery = 'failed' ORDER BY part_index",
+                  [result.turnId],
+                );
+                for (const row of failed) this.emit("event.message", this.chat.getMessage(row.id));
+              } catch (error) {
+                this.deps.log.warn(`[wechat] 标记失败消息出错：${(error as Error)?.message ?? String(error)}`);
+              }
+              this.deps.log.warn(
+                `[wechat] ${chatTitle || chatUsername}：只发出去 ${sentCount}/${buffered.length} 条（${outcome.error ?? "旁路没说原因"}）`,
+              );
             }
           },
         });
@@ -184,7 +317,7 @@ export class App {
     this.proactive = new ProactiveService(this.deps, ports, runtime.consent, runtime.cost, runtime.settings);
     // 主动消息的第二个出口：通道可用且开关打开时才真的发出去（判断逻辑留在通道层）
     this.proactive.setRelay({
-      deliver: (text) => this.wechat.sendAsync(text),
+      deliver: (texts) => this.wechat.sendMany(texts),
       enabled: () => {
         const status = this.wechat.status();
         return status.enabled && status.relayProactive;
@@ -245,6 +378,28 @@ export class App {
         return this.snapshot();
 
       /* ---------------- 对话 ---------------- */
+      case "chat.summaries": {
+        // 左侧列表的摘要：每条会话线取最后一条非系统消息，和总条数。
+        const rows = this.deps.db.all<{ channel_id: string; n: number }>(
+          "SELECT channel_id, COUNT(*) AS n FROM messages WHERE agent_id = ? GROUP BY channel_id",
+          [this.deps.agentId],
+        );
+        const summaries = rows.map((row) => {
+          const conversation = String(row.channel_id ?? "app");
+          const last = this.deps.db.get<{ text: string; ts: number; role: "user" | "agent" | "system" }>(
+            "SELECT text, ts, role FROM messages WHERE agent_id = ? AND channel_id = ? AND role <> 'system' ORDER BY id DESC LIMIT 1",
+            [this.deps.agentId, conversation],
+          );
+          return {
+            conversation,
+            lastText: truncateForSummary(last?.text ?? ""),
+            lastTs: last?.ts ?? 0,
+            lastRole: last?.role ?? "agent",
+            messageCount: Number(row.n ?? 0),
+          };
+        });
+        return { summaries };
+      }
       case "chat.history": {
         const limit = Math.min(Math.max(Number(p.limit ?? 60), 1), 300);
         let beforeId: number | undefined;
@@ -273,6 +428,7 @@ export class App {
           clientTs: typeof p.clientTs === "number" ? p.clientTs : undefined,
           conversation: typeof p.conversation === "string" ? p.conversation : undefined,
           presence: p.presence,
+          uploadId: typeof p.uploadId === "string" ? p.uploadId : undefined,
         });
       case "chat.typing": {
         this.mind.touchPresence(p.isTyping ? "phone_in_hand" : "idle", "behavior");
@@ -289,6 +445,43 @@ export class App {
       }
       case "chat.recall":
         return { message: this.chat.recall(Number(p.messageId)) };
+
+      /* ---------------- 语音条（docs/语音条.md） ---------------- */
+      case "media.upload":
+        return this.media.upload({
+          dataBase64: p.dataBase64,
+          mime: p.mime,
+          durMs: p.durMs,
+          peaks: p.peaks,
+        });
+      case "media.load":
+        return this.media.load({
+          uploadId: typeof p.uploadId === "string" ? p.uploadId : undefined,
+          messageId: typeof p.messageId === "number" ? p.messageId : undefined,
+        });
+      case "media.status":
+        return this.media.status();
+      case "media.meta.set":
+        return { attachment: this.media.metaSet({ messageId: Number(p.messageId), durMs: p.durMs, peaks: p.peaks }) };
+      case "media.retry":
+        return this.media.retry({ messageId: Number(p.messageId) });
+      case "media.respeak":
+        return this.media.respeak({ messageId: Number(p.messageId) });
+      case "media.attachment":
+        return { attachment: this.media.readAttachment(Number(p.messageId)) };
+      case "media.voices":
+        return this.media.voices();
+      case "media.preview":
+        return this.media.preview(typeof p.text === "string" ? p.text : "");
+      case "media.setVoiceOutbound": {
+        const mode = p.mode;
+        if (mode !== "off" && mode !== "auto" && mode !== "always") {
+          throw new AnterosError(ERROR_CODES.EINVALID, "mode 只能是 off / auto / always");
+        }
+        this.runtime.settings.set("media.voiceOutbound", mode);
+        this.runtime.audit.log("media.set_voice_outbound", { actorRole: "owner", after: { mode } });
+        return { voiceOutbound: mode };
+      }
 
       /* ---------------- 记忆 ---------------- */
       case "memory.search": {
@@ -311,9 +504,9 @@ export class App {
           offset: conversation === null ? Number(p.offset ?? 0) : 0,
         });
         if (conversation === null) return listed;
-        // 指定对话线时只留这条线上的情节记忆（app 主会话 → channelId "app"）
-        const items = listed.items.filter((item) => (item.channelId ?? "app") === conversation);
-        return { ...listed, items, total: items.length };
+        // 记忆是共享的一份：带 conversation 也只是"从这个会话进来看看它记得什么"，
+        // 不再按对话线过滤——否则私聊和群里像两个互不相干的脑子。
+        return listed;
       }
       case "memory.get":
         return { item: this.memory.get(this.deps.agentId, Number(p.id)) };
@@ -354,6 +547,25 @@ export class App {
         fs.writeFileSync(file, JSON.stringify(payload, null, 2), "utf8");
         this.runtime.audit.log("memory.export", { actorRole: "owner", after: { file } });
         return { path: file, bytes: fs.statSync(file).size };
+      }
+      case "voice.held": {
+        // 它留着没说出口的那句话（`<voice wait>`）：只给 owner 看，不算敏感操作，不写审计
+        return {
+          items: this.voiceHold.list(Date.now()).map((item) => ({
+            conversation: item.conversation,
+            text: item.text,
+            ts: item.ts,
+            seen: item.seen,
+          })),
+        };
+      }
+      case "voice.held.clear": {
+        const conversation = typeof p["conversation"] === "string" ? String(p["conversation"]).trim() : "";
+        if (conversation.length === 0) throw new AnterosError(ERROR_CODES.EPERM, "要指定是哪条会话");
+        this.runtime.permissions.assertOwner("清掉「留着没说出口的话」");
+        this.voiceHold.clear(conversation);
+        this.runtime.audit.log("voice.held.clear", { actorRole: "owner", after: { conversation } });
+        return { cleared: true };
       }
 
       /* ---------------- 声明闸 ---------------- */
@@ -617,6 +829,37 @@ export class App {
           after: { enabled: status.relayProactive },
         });
         return status;
+      }
+      /** 微信里回话发真语音条（虚拟声卡路线）：打开前要过自检，否则会录到房间里的声音。 */
+      case "channels.wechat.setVoiceOutbound": {
+        this.runtime.permissions.assertOwner("设置微信发语音");
+        const input = (params ?? {}) as { enabled?: unknown };
+        const enabled = input.enabled === true;
+        if (enabled) {
+          const probe = await this.wechat.voiceStatus(true);
+          if (!probe.ok) {
+            throw new AnterosError(
+              ERROR_CODES.EBLOCKED,
+              `虚拟声卡自检没过，先别开：${probe.message ?? "声音送不进微信的麦克风"}`,
+            );
+          }
+        }
+        const status = this.wechat.setVoiceOutbound(enabled);
+        this.runtime.audit.log("wechat.setVoiceOutbound", { actorRole: "owner", after: { enabled } });
+        return status;
+      }
+      case "channels.wechat.voiceStatus": {
+        const input = (params ?? {}) as { force?: unknown };
+        return this.wechat.voiceStatus(input.force === true);
+      }
+      /** 本机有没有虚拟声卡（VB-CABLE）：只读，不弹窗、不改任何东西。 */
+      case "channels.wechat.soundcardStatus":
+        return await this.wechat.soundcardStatus();
+      /** 一键装虚拟声卡：会弹一次 UAC 提权，所以是 owner 动作，并且留审计。 */
+      case "channels.wechat.installSoundcard": {
+        this.runtime.permissions.assertOwner("安装虚拟声卡驱动");
+        this.runtime.audit.log("soundcard.install", { actorRole: "owner" });
+        return await this.wechat.installSoundcard();
       }
       /** 验证「主动消息 → 微信」这条路：真发一条带标记的自检消息，如实回报成败。 */
       case "proactive.verifyRelay": {

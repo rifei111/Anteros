@@ -37,7 +37,7 @@ export function MemoryStrip({ conversation }: { conversation: string }) {
   return (
     <div className={open ? "memory-strip memory-strip-open" : "memory-strip"}>
       <button className="memory-strip-head" onClick={() => setOpen(!open)} type="button">
-        <span className="memory-strip-title">它记得关于这条对话的 {items.length} 件事</span>
+        <span className="memory-strip-title">它记得 {items.length} 件事（所有对话共用）</span>
         <span className="memory-strip-toggle">{open ? "收起" : "展开"}</span>
       </button>
       {open ? (

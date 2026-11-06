@@ -27,7 +27,7 @@ import type {
   WorldState,
 } from "@anteros/shared";
 import type { ConnectionInfo } from "./kernel";
-import type { WechatChatTarget } from "@anteros/shared";
+import type { ConversationSummary, WechatChatTarget } from "@anteros/shared";
 import type { UpdateStatusView } from "../../../common/protocol";
 
 export type Phase = "connecting" | "consent" | "onboarding" | "ready";
@@ -39,6 +39,7 @@ export type AdminTab =
   | "channels"
   | "memory"
   | "expression"
+  | "voice"
   | "proactive"
   | "cost"
   | "model"
@@ -59,6 +60,8 @@ export interface StreamView {
   typing: boolean;
   /** 内核给的预计打字时长（仅用于展示，不参与本地计时） */
   plannedMs: number | null;
+  /** 正在转写你刚发的那条语音：这段时间界面必须说话，不能装作在思考 */
+  transcribing?: boolean;
 }
 
 export type ToastLevel = "info" | "success" | "warn" | "error";
@@ -68,6 +71,12 @@ export interface ToastItem {
   level: ToastLevel;
   title: string;
   detail: string | null;
+}
+
+/** 一条「某项能力暂时用不了」：只存插件 id 与原始原因，界面上说人话。 */
+export interface DegradedNotice {
+  pluginId: string;
+  reason: string;
 }
 
 export interface LogLine {
@@ -118,6 +127,12 @@ export interface AppState {
   historyLoading: boolean;
   stream: StreamView | null;
   unread: number;
+  /** 按会话线分开记未读：切过去才不会显示成"这条线上有新消息" */
+  unreadByConversation: Record<string, number>;
+  /** 每条会话线的摘要（最后一句 + 时间），左侧列表用 */
+  conversationSummaries: Record<string, ConversationSummary>;
+  /** 当前降级的插件（持续状态，不是一次性提示）：聊天页顶部能力条的数据源 */
+  degraded: DegradedNotice[];
   adminOpen: boolean;
   adminTab: AdminTab;
   searchOpen: boolean;
@@ -163,6 +178,9 @@ const initialState: AppState = {
   historyLoading: false,
   stream: null,
   unread: 0,
+  unreadByConversation: {},
+  conversationSummaries: {},
+  degraded: [],
   adminOpen: false,
   adminTab: "owner",
   searchOpen: false,
@@ -212,8 +230,33 @@ export function applyUpdateStatus(status: UpdateStatusView): void {
 }
 
 /** 聊天对象头像：内核快照 / `ui.avatar.set` 返回值都走这里。 */
+export function applyConversationSummaries(list: ConversationSummary[]): void {
+  const next: Record<string, ConversationSummary> = {};
+  for (const item of list) next[item.conversation] = item;
+  setState({ conversationSummaries: next });
+}
+
 export function applyWechatChats(chats: WechatChatTarget[]): void {
   setState({ wechatChats: chats });
+}
+
+/** 某条会话线上来了新消息：只给它自己加未读。 */
+export function bumpConversationUnread(key: string): void {
+  setState((previous) => {
+    const next = { ...previous.unreadByConversation };
+    next[key] = (next[key] ?? 0) + 1;
+    return { unreadByConversation: next, unread: key === previous.activeConversation ? previous.unread : previous.unread + 1 };
+  });
+}
+
+/** 切到这条线（或把它读掉）时清掉它的未读。 */
+export function clearConversationUnread(key: string): void {
+  setState((previous) => {
+    if (previous.unreadByConversation[key] === undefined) return { unread: 0 };
+    const next = { ...previous.unreadByConversation };
+    delete next[key];
+    return { unreadByConversation: next, unread: 0 };
+  });
 }
 
 export function applyAgentAvatar(dataUrl: string | null): void {
@@ -243,6 +286,18 @@ export function setRuntimeFeedUrl(url: string): void {
     }
     return { pluginRuntime: next };
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* 降级能力                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 插件降级写进状态而不是弹提示：它不是一个「出错了」的瞬间，而是这台机器
+ * 当前能做什么。健康巡检会反复上报同一批，整块替换即可，天然去重。
+ */
+export function applyDegraded(list: DegradedNotice[]): void {
+  setState({ degraded: list });
 }
 
 /* ------------------------------------------------------------------ */

@@ -201,7 +201,7 @@ export function ModelTab() {
             <div className="banner-title">还没接通模型：现在的回复来自本机回声（演示模式）</div>
             <div className="banner-detail">
               {status.lastError ?? "选一个服务商、填密钥、点「测试连接」确认通了，再保存。"}
-              {status.degradedLocalEcho ? " 不接通也能玩：所有回复都在本机生成，不产生云端调用。" : ""}
+              {status.degradedLocalEcho ? " 不接通也能用：所有回复都在本机生成。" : ""}
             </div>
           </div>
         </div>

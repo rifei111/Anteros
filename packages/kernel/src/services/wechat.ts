@@ -131,6 +131,8 @@ export class WechatChannelService {
   private backlogCutoffTs = 0;
   /** 连续发送失败后先冷静一会儿，别把队列堵死 */
   private sendFailures = 0;
+  /** 虚拟声卡自检结果：能不能把声音送进微信的麦克风（发语音条的前提）。 */
+  private voiceReady = false;
   private cooldownUntil = 0;
   /** 每个会话各自的水位：群聊和私聊同时盯，不能共用一个 */
   private sinceSeqByChat = new Map<string, number>();
@@ -187,6 +189,8 @@ export class WechatChannelService {
       installLog: this.installLog.slice(-MAX_LOG_LINES),
       lastCheckTs: this.settings.getJson<number>("wechat.lastCheckTs", 0),
       relayProactive: this.settings.getJson<boolean>("wechat.relayProactive", false) === true,
+      voiceOutbound: this.settings.getJson<boolean>("wechat.voiceOutbound", false) === true,
+      voiceReady: this.voiceReady,
       chats: this.chatsView(),
       maxChats: this.maxChats(),
       queueDepth: this.chatsView().reduce((sum, chat) => sum + chat.queueDepth, 0),
@@ -222,6 +226,23 @@ export class WechatChannelService {
           lastError: null,
         });
       }
+    }
+    // 自愈：老设置里那个"私聊对象"（wechat.chatUsername）如果没在列表里，把它补回来。
+    // 之前 addChat/removeChat 只维护数组，谁把这一条删掉、或者老接口 setChat 覆盖过数组，
+    // 私聊就再也没人巡检了——界面上一切正常，只是它永远不回私聊。
+    const legacy = this.chatUsername();
+    if (legacy.length > 0 && !list.some((chat) => chat.username === legacy)) {
+      list.unshift({
+        username: legacy,
+        title: this.chatTitle ?? legacy,
+        kind: legacy.endsWith("@chatroom") ? "group" : "direct",
+        mode: "all",
+        inboundCount: 0,
+        outboundCount: 0,
+        lastMessageTs: null,
+        queueDepth: 0,
+        lastError: null,
+      });
     }
     return list;
   }
@@ -317,6 +338,11 @@ export class WechatChannelService {
     const chats = this.chats().filter((chat) => chat.username !== value);
     this.saveChats(chats);
     this.perChat.delete(value);
+    // 删掉的就是"老设置里那个私聊对象"时，把老设置也清掉，
+    // 否则 chats() 的自愈逻辑会把它又补回来，用户会觉得"删不掉"。
+    if (value === this.chatUsername()) {
+      this.settings.setJson("wechat.chatUsername", "");
+    }
     await this.pushChatsToSidecar();
     this.audit.log("wechat.remove_chat", { actorRole: "owner", after: { username: value } });
     this.publish();
@@ -372,6 +398,14 @@ export class WechatChannelService {
   setRelayProactive(enabled: boolean): WechatChannelStatus {
     this.settings.setJson("wechat.relayProactive", enabled === true);
     this.deps.log.info(`wechat relayProactive = ${enabled === true}`);
+    this.publish();
+    return this.status();
+  }
+
+  /** 微信里回话要不要发语音条（虚拟声卡路线，默认关）。 */
+  setVoiceOutbound(enabled: boolean): WechatChannelStatus {
+    this.settings.setJson("wechat.voiceOutbound", enabled === true);
+    this.deps.log.info(`wechat voiceOutbound = ${enabled === true}`);
     this.publish();
     return this.status();
   }
@@ -987,6 +1021,9 @@ export class WechatChannelService {
     }
     this.settings.setJson("wechat.chatUsername", value);
     const kind: "direct" | "group" = value.endsWith("@chatroom") ? "group" : "direct";
+    // 老接口也只"加一条"，不要拿它当"只留这一条"用：
+    // 以前这里 saveChats([...一条]) 会把别的会话整段覆盖掉。
+    const rest = this.chats().filter((chat) => chat.username !== value);
     this.saveChats([
       {
         username: value,
@@ -999,6 +1036,7 @@ export class WechatChannelService {
         queueDepth: 0,
         lastError: null,
       },
+      ...rest,
     ]);
     await this.pushChatsToSidecar();
     this.audit.log("wechat.set_chat", { actorRole: "owner", after: { chatUsername: value } });
@@ -1261,7 +1299,21 @@ export class WechatChannelService {
       this.sinceSeq = Math.max(this.sinceSeq ?? 0, result.nextSeq);
     }
 
-    for (const message of result.messages ?? []) {
+    const rawMessages = result.messages ?? [];
+    if (rawMessages.length > 0) {
+      // 通道「看着就绪但一条都收不到」时，这行日志是唯一的线索：
+      // 读到了几条、分别是哪个会话、是不是自己发的。
+      this.deps.log.info(
+        "[wechat] 巡检拿到 " +
+          rawMessages.length +
+          " 条：" +
+          rawMessages
+            .map((item) => (item.chatUsername ?? "?") + "/" + String(item.kind ?? "?") + (item.isSelf === true ? "/self" : ""))
+            .join(" "),
+      );
+    }
+
+    for (const message of rawMessages) {
       if (message.isSelf === true) continue;
       // 旁路进程负责把上游的中文类型归一成 text/image/…，这里再兜一层：
       // 只处理文本，但两种写法都认（历史上中文 kind 被直接透传过，导致消息全被丢掉）
@@ -1272,9 +1324,21 @@ export class WechatChannelService {
       const chatUsername = String(message.chatUsername ?? "").trim();
       // 认不出是哪个会话的消息不能乱记到第一个会话头上（以前就是这么串线的）
       const target = targets.find((chat) => chat.username === chatUsername);
-      if (!target) continue;
+      if (!target) {
+        this.deps.log.warn(
+          "[wechat] 跳过消息：会话「" +
+            chatUsername +
+            "」不在盯的名单里（名单：" +
+            targets.map((item) => item.username).join("、") +
+            "）",
+        );
+        continue;
+      }
       // 只看不回：连计数都不动，免得界面上以为它在处理
-      if (target.mode === "off") continue;
+      if (target.mode === "off") {
+        this.deps.log.info("[wechat] 跳过消息：会话「" + target.title + "」设成了只看不回");
+        continue;
+      }
       // 「自己决定回不回」：照样进上下文，但允许模型决定这次不出声
       const decideReply = target.mode === "auto";
       // 群聊默认跟着所有消息回；切成「只在被 @ 时回」的，非 @ 消息就不接
@@ -1295,6 +1359,7 @@ export class WechatChannelService {
       this.publish();
       const senderName = String(message.senderTitle ?? "").trim();
       const senderId = String(message.senderUsername ?? "").trim();
+      this.deps.log.info("[wechat] 收到消息（会话「" + target.title + "」）：" + text.slice(0, 30));
       try {
         await this.options.onInbound({
           text,
@@ -1419,7 +1484,17 @@ export class WechatChannelService {
     if (blocked !== null) return { ok: false, error: blocked };
     this.sendInFlight += 1;
     try {
-      await this.request("send", { text: value, ...this.sendParams(target) }, SEND_TIMEOUT_MS);
+      const result = (await this.request("send", { text: value, ...this.sendParams(target) }, SEND_TIMEOUT_MS)) as {
+        ok?: boolean;
+        error?: string;
+      };
+      if (result?.ok === false) {
+        const reason = result.error ?? "旁路说没发出去";
+        this.lastError = `发送失败：${reason}`;
+        this.noteSendFailure();
+        this.publish();
+        return { ok: false, error: reason };
+      }
       this.sendFailures = 0;
       this.cooldownUntil = 0;
       this.lastOutboundTs = Date.now();
@@ -1433,6 +1508,201 @@ export class WechatChannelService {
       return { ok: false, error: message };
     } finally {
       this.sendInFlight = Math.max(0, this.sendInFlight - 1);
+    }
+  }
+
+  /**
+   * 一次回复拆成几条气泡时，一口气发出去。
+   * 为什么不让上层一条条调 send()：每次 send 都要重新打开会话（搜一次会话），
+   * 群里能看到搜索框被点好几次，又慢又像机器人。
+   */
+  async sendMany(texts: string[], chatUsername?: string): Promise<{ ok: boolean; sent?: number; error?: string }> {
+    const parts = (texts ?? []).map((item) => (item ?? "").trim()).filter((item) => item.length > 0);
+    if (parts.length === 0) return { ok: false, error: "内容为空" };
+    if (!this.running) return { ok: false, error: "微信通道没有运行：先在通道页开启它" };
+    const target = this.resolveTarget(chatUsername);
+    const blocked = this.sendBlockedReason();
+    if (blocked !== null) return { ok: false, error: blocked };
+    this.sendInFlight += 1;
+    try {
+      const result = (await this.request(
+        "send",
+        { texts: parts, ...this.sendParams(target) },
+        // 旁路里的拟人节流会真的 sleep：120 秒内写满 6 次后要冷却 30–75 秒，
+        // 一条回复 6 段就可能撞上。旁路自己的预算是 90s + 21.6s/段，这里再宽 25 秒，
+        // 让旁路先把真实原因说出来，而不是被内核先杀掉（杀掉就只剩「超时」三个字）。
+        Math.min(15 * 60_000, 120_000 + 25_000 * (parts.length - 1)),
+      )) as { ok?: boolean; sent?: number; error?: string };
+      const sent = typeof result.sent === "number" ? result.sent : parts.length;
+      // 旁路把「发到一半失败」当成正常返回（result.ok === false），不当错误抛。
+      // 以前这里只看 result.sent，于是内核以为全发成功，用户看到只到了前三句。
+      if (result.ok === false) {
+        const reason = result.error ?? "旁路说没发出去";
+        this.lastError = `发送失败：${reason}`;
+        this.noteSendFailure();
+        this.publish();
+        return { ok: false, sent, error: reason };
+      }
+      this.sendFailures = 0;
+      this.cooldownUntil = 0;
+      this.lastOutboundTs = Date.now();
+      this.outboundCount += sent;
+      this.publish();
+      return { ok: sent >= parts.length, sent, error: sent >= parts.length ? undefined : `只发出去 ${sent}/${parts.length} 条` };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.lastError = "发送失败：" + message;
+      this.noteSendFailure();
+      this.publish();
+      return { ok: false, error: message };
+    } finally {
+      this.sendInFlight = Math.max(0, this.sendInFlight - 1);
+    }
+  }
+
+  /**
+   * 发一条真语音条（虚拟声卡路线）：旁路进程按住微信的语音键，把 wav 播进虚拟线。
+   * 失败一律回原因，上层退回发文字——语音是锦上添花，不能把话弄丢。
+   */
+  async sendVoice(
+    wavPath: string,
+    durationMs: number,
+    chatUsername?: string,
+  ): Promise<{ ok: boolean; durationMs?: number; voicelength?: number; error?: string }> {
+    if (!this.running) return { ok: false, error: "微信通道没有运行：先在通道页开启它" };
+    const target = this.resolveTarget(chatUsername);
+    const blocked = this.sendBlockedReason();
+    if (blocked !== null) return { ok: false, error: blocked };
+    this.sendInFlight += 1;
+    try {
+      const result = (await this.request(
+        "voice.send",
+        {
+          wav: wavPath,
+          durationMs: Math.round(durationMs),
+          chatUsername: target.username,
+          chatTitle: target.title,
+        },
+        Math.max(SEND_TIMEOUT_MS, Math.round(durationMs) + 45_000),
+      )) as { ok?: boolean; durationMs?: number; voicelength?: number; error?: string };
+      if (result?.ok === false) {
+        const reason = result.error ?? "旁路说语音没发出去";
+        this.lastError = `发语音失败：${reason}`;
+        this.noteSendFailure();
+        this.publish();
+        return { ok: false, error: reason };
+      }
+      this.sendFailures = 0;
+      this.cooldownUntil = 0;
+      this.lastOutboundTs = Date.now();
+      this.outboundCount += 1;
+      this.publish();
+      return {
+        ok: true,
+        durationMs: typeof result?.durationMs === "number" ? result.durationMs : Math.round(durationMs),
+        voicelength: typeof result?.voicelength === "number" ? result.voicelength : undefined,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.lastError = "发语音失败：" + message;
+      this.noteSendFailure();
+      this.publish();
+      return { ok: false, error: message };
+    } finally {
+      this.sendInFlight = Math.max(0, this.sendInFlight - 1);
+    }
+  }
+
+  /** 虚拟声卡自检：能不能把声音送进微信的麦克风。管理面板上要能手动点一下看到结果。 */
+  async voiceStatus(force = false): Promise<{
+    ok: boolean;
+    playbackDevice?: string;
+    rms?: number;
+    message?: string;
+  }> {
+    if (!this.running) return { ok: false, message: "微信通道没有运行：先在通道页开启它" };
+    try {
+      const result = (await this.request("voice.status", { force }, REQUEST_TIMEOUT_MS)) as {
+        ok?: boolean;
+        playbackDevice?: string;
+        rms?: number;
+        message?: string;
+      };
+      this.voiceReady = result?.ok === true;
+      this.publish();
+      return {
+        ok: result?.ok === true,
+        playbackDevice: result?.playbackDevice,
+        rms: result?.rms,
+        message: result?.message,
+      };
+    } catch (error) {
+      this.voiceReady = false;
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /**
+   * 本机有没有虚拟声卡（VB-CABLE）：只读检测，不弹任何窗口、不打开任何设备。
+   * 「声音」页靠它显示「已安装 / 未安装」，以及能不能点「一键安装」。
+   */
+  async soundcardStatus(): Promise<{
+    installed: boolean;
+    playbackDevice?: string;
+    captureDevice?: string;
+    bundled: boolean;
+    message: string;
+  }> {
+    if (!this.running) return { installed: false, bundled: false, message: "微信通道没有运行：先在通道页开启它" };
+    try {
+      const result = (await this.request("soundcard.status", {}, REQUEST_TIMEOUT_MS)) as {
+        installed?: boolean;
+        playbackDevice?: string | null;
+        captureDevice?: string | null;
+        bundled?: boolean;
+        message?: string;
+      };
+      const installed = result?.installed === true;
+      return {
+        installed,
+        // 旁路没装的那一头给的是 null，不是缺字段：界面上要「不显示」就得转成 undefined。
+        playbackDevice: typeof result?.playbackDevice === "string" ? result.playbackDevice : undefined,
+        captureDevice: typeof result?.captureDevice === "string" ? result.captureDevice : undefined,
+        bundled: result?.bundled === true,
+        message: typeof result?.message === "string" ? result.message : installed ? "虚拟声卡已就绪" : "没读到虚拟声卡状态",
+      };
+    } catch (error) {
+      // 旁路没起来时别把异常抛到界面：如实说「没检测到」，用户还能点重新检测。
+      return {
+        installed: false,
+        bundled: false,
+        message: `读不到虚拟声卡状态：${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  /**
+   * 一键装虚拟声卡：旁路会弹一次 UAC 提权跑随应用带的安装程序，装完还要重启微信与
+   * 本应用才会认到设备。整个等待可能到两分钟，所以这里的超时给得比普通请求宽。
+   */
+  async installSoundcard(): Promise<{ ok: boolean; needsAdmin?: boolean; needsRestart?: boolean; message: string }> {
+    if (!this.running) return { ok: false, message: "微信通道没有运行：先在通道页开启它" };
+    try {
+      const result = (await this.request("soundcard.install", {}, 180_000)) as {
+        ok?: boolean;
+        needsAdmin?: boolean;
+        needsRestart?: boolean;
+        message?: string;
+      };
+      const ok = result?.ok === true;
+      return {
+        ok,
+        needsAdmin: result?.needsAdmin === true ? true : undefined,
+        needsRestart: result?.needsRestart === true ? true : undefined,
+        message: typeof result?.message === "string" ? result.message : ok ? "虚拟声卡装好了" : "安装没成功，原因不明",
+      };
+    } catch (error) {
+      return { ok: false, message: `安装失败：${error instanceof Error ? error.message : String(error)}` };
     }
   }
 

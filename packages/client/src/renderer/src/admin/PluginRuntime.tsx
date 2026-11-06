@@ -332,7 +332,7 @@ export function PluginRuntimePanel({
               {!plugin.enabled ? (
                 <div className="plugin-runtime-ready">
                   <span>
-                    运行环境已就绪，但插件还没启用 —— 现在就启用它会拉起适配器骨架（仍然不会连接微信本体）。
+                    运行环境已就绪，但插件还没启用，现在就启用它会拉起适配器骨架（仍然不会连接微信本体）。
                   </span>
                   <button className="btn btn-sm btn-primary" disabled={locked} onClick={() => void prepareAndEnable()}>
                     授权并启用

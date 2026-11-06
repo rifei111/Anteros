@@ -158,8 +158,11 @@ export class PluginRegistry {
     if (!fs.existsSync(entryPath)) {
       issues.push(`入口文件不存在：${path.relative(dir, entryPath) || entryPath}`);
     }
-    if (manifest.secrets.length > 0) {
-      issues.push(`需要 ${manifest.secrets.length} 项密钥（未配置会导致 blocked）：${manifest.secrets.join("、")}`);
+    if (manifest.requiredSecrets.length > 0) {
+      issues.push(`需要 ${manifest.requiredSecrets.length} 项密钥（未配置会导致 blocked）：${manifest.requiredSecrets.join("、")}`);
+    }
+    if (manifest.optionalSecrets.length > 0) {
+      issues.push(`另有 ${manifest.optionalSecrets.length} 项可选密钥（只影响对应能力）：${manifest.optionalSecrets.join("、")}`);
     }
     return { ok: true, info: { manifest, dir, entryPath, issues } };
   }

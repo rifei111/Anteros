@@ -7,8 +7,8 @@
  * 否则回放（规范 1 §5.3）就对不上当时的表达参数。
  *
  * 采样方式：以 DEFAULT_TRAITS 为中心的截断正态，落在规范 1 §2.2 的参数范围内。
- * 注意 burstMin 恒为 1、burstMax ∈ {2,3}，于是"分条 1~3 条"这条表达约束
- * 由人格参数直接决定（草案 4.1）。
+ * 注意 burstMin 恒为 1、burstMax ∈ {2,20}：每轮最多几条气泡由它和文字长度共同决定，
+ * 硬天花板是 planner 的 MAX_PARTS（20 条）。
  */
 import type { PersonaTraits } from "@anteros/shared";
 import { DEFAULT_TRAITS } from "@anteros/shared";
@@ -28,7 +28,7 @@ export const TRAIT_RANGES = {
   delayMedianMs: [3000, 6000],
   delaySigma: [0.4, 0.9],
   burstMin: [1, 1],
-  burstMax: [2, 3],
+  burstMax: [2, 20],
   typoRate: [0.005, 0.04],
 } as const satisfies Record<string, readonly [number, number]>;
 
@@ -61,7 +61,8 @@ export function sampleTraits(seed: string | number): PersonaTraits {
   const emotionGain = truncatedNormal(rng, DEFAULT_TRAITS.emotionGain, 0.25, 1.0, 2.5, 3);
   const delayMedianMs = Math.round(truncatedNormal(rng, DEFAULT_TRAITS.delayMedianMs, 500, 3000, 6000, 0));
   const delaySigma = truncatedNormal(rng, DEFAULT_TRAITS.delaySigma, 0.08, 0.4, 0.9, 3);
-  const burstMax = rng.bool(0.6) ? 3 : 2;
+  // 多数人写短句（2–4 条）；少数话痨只有在长回复时才体现出来。
+  const burstMax = rng.bool(0.7) ? rng.int(2, 4) : rng.int(5, 20);
   return {
     detailPref: truncatedNormal(rng, DEFAULT_TRAITS.detailPref, 0.12, 0.35, 0.95, 4),
     warmth: truncatedNormal(rng, DEFAULT_TRAITS.warmth, 0.15, 0.2, 0.95, 4),
@@ -119,7 +120,7 @@ export function projectMbti(mbti: string): Partial<PersonaTraits> {
   patch.detailPref = clamp(DEFAULT_TRAITS.detailPref + (sn === "S" ? 0.2 : -0.1), 0.35, 0.95);
   patch.warmth = clamp(DEFAULT_TRAITS.warmth + (tf === "F" ? 0.1 : -0.1), 0.2, 0.95);
   patch.emotionGain = clamp(DEFAULT_TRAITS.emotionGain + (tf === "F" ? 0.3 : -0.2), 1.0, 2.5);
-  patch.burstMax = clamp(DEFAULT_TRAITS.burstMax + (jp === "J" ? -1 : 0), 2, 3);
+  patch.burstMax = clamp(DEFAULT_TRAITS.burstMax + (jp === "J" ? -1 : 0), 2, 20);
   patch.delayMedianMs = Math.round(clamp(DEFAULT_TRAITS.delayMedianMs + (jp === "J" ? -300 : 300), 3000, 6000));
   return patch;
 }

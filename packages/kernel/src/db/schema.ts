@@ -15,7 +15,7 @@
  * 3. 单一写入入口：只有 service 层写库，不允许应用层直接 UPDATE。
  */
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export const SCHEMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -277,7 +277,11 @@ CREATE TABLE IF NOT EXISTS messages (
   delivery      TEXT NOT NULL DEFAULT 'sent',
   -- 群聊：这句话是谁说的（昵称 / wxid）。私聊为空。
   sender_name   TEXT,
-  sender_id     TEXT
+  sender_id     TEXT,
+  -- 语音条附件（JSON，见 shared/domain.ts 的 MessageAttachment）。
+  -- 为什么跟正文同表而不是另开一张：附件是"这条消息的一个属性"，
+  -- 分表就要多一次 join，而附件永远 0 或 1 个，放一列最省事（docs/语音条.md 5.4）。
+  attachment    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_messages_agent_ts ON messages (agent_id, ts DESC);
 

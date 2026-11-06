@@ -12,14 +12,26 @@
  */
 import type { LlmMessage, MemoryPort, MindPort, PromptBundle } from "../contracts.js";
 import type { KernelDeps } from "../contracts.js";
-import type { MemoryItem, MemorySearchResult, Persona, PresenceState, RelationStage, WorldState } from "@anteros/shared";
+import type { MemoryItem, MemorySearchResult, MessageAttachment, Persona, PresenceState, RelationStage, WorldState } from "@anteros/shared";
 import { stagePhrase } from "../mind/relation.js";
 
 /** 两种模式共用的写法约束：不管标不标准，这些是"像人"的前提。 */
 const COMMON_CONSTRAINTS = [
-  "回复拆成 1–3 条短消息，每条不超过 25 个字",
+  "回复拆成 1–20 条短消息，每条不超过 32 个字（想多说就多说几条，别全塞进一条）",
+  "每一条单独占一行：一行就是一条消息，别把几句挤在同一行里",
+  "标点跟着意思走：该断气的地方打逗号，一句话说完打句号或问号；但别用标点把一个词或半句话劈开",
   "不要使用固定开场、固定收尾或任何模板句式；每次都要像重新想出来的",
   "不要复述用户的话再加评价，不要用排比三段式，不要每段都以「嗯」开头",
+  "只写你要发出去的话：不要写思考过程、不要写「我在分析用户」「他可能是这个意思」这类旁白，也不要用任何尖括号标签（唯一例外是下面说声音用的 <voice>）",
+  "想用声音说的时候，把那句想让人听见的话单独用 <voice>…</voice> 包起来：一句一个标签，可以标一到三句，每句不超过 25 字；平时聊天不必用，留给短、带情绪、想被听见的话",
+  "例：先说一句打字的话，再接 <voice>那我试试看哦</voice>。标出来的句子会各自变成一条语音发出去，没标的那几句照常打字——哪句用声音、哪句打字，由你自己决定",
+  "别整段都标：一段话全变成语音，对方就看不见字了。要是这话本来就该用嘴说、不必留字，那就只标那一句，别的文字可以很短或者不写",
+  "历史里出现的「（我刚用语音说的）」「（他/她用语音说的）」是系统给你的标注，告诉你哪句是声音、哪句是打字；你自己说话时不要写这类括号前缀，那不是你要说的话",
+  "你本来就能说话：语音是你自己的声音，随时能发，不用「录」，也不用先准备。别拿「我手机里没录过」「我得先录一段」「我这边只能打字」当理由——那不是真的",
+  "对方明确要你发语音、要听你的声音、让你先说一句时：像人那样把顺序摆对——铺垫的话（「先说好，别笑我」「我试试啊」）打字发，真正要说的那句用 <voice> 标出来发语音；一条回复里顶多一到两句文字铺垫，别用四句文字绕圈子",
+  "如果还没想好说什么、或者本来就该等对方先回，那就别急着发语音：可以先打字说一句，等这轮聊下去再说。语音永远落在「你真正想说的话」上，不落在铺垫上",
+  "真有一句想用声音说、但现在还不是时候（对方还没回、你还在等）：写成 <voice wait>那句话</voice>。这一轮不用它出声，也不打字，先存着；对方回话后系统会把它摆到你面前，那时候再决定说不说。别滥用——攒着不说的话，过几轮就作废了",
+  "对方没要语音、你也没什么非说不可的时候，就别发语音；语音是用来说那些用嘴说才对的短句，不是用来表演的",
 ];
 
 /** 标准模式：认账、留边界。 */
@@ -157,8 +169,10 @@ export function buildSystemPrompt(input: {
   conversation?: string;
   /** 允许它自己决定这次不回（群聊「自己决定」模式） */
   silenceAllowed?: boolean;
+  /** 上一轮它留着没说出口的那句话（`<voice wait>` 标的） */
+  heldVoice?: string;
 }): string {
-  const { deps, persona, relationStage, mode, world, drives, slots, recall, trigger, reason, now, conversation, silenceAllowed } = input;
+  const { deps, persona, relationStage, mode, world, drives, slots, recall, trigger, reason, now, conversation, silenceAllowed, heldVoice } = input;
   const sections: string[] = [];
 
   sections.push(
@@ -281,6 +295,18 @@ export function buildSystemPrompt(input: {
     );
   }
 
+  // 上一轮它留着没说出口的那句话（`<voice wait>`）：现在摆到它面前，发不发它自己定。
+  if (typeof heldVoice === "string" && heldVoice.trim().length > 0) {
+    sections.push(
+      [
+        "【你上一轮留着没说出口的一句话】",
+        `「${heldVoice.trim()}」`,
+        "那时候你觉得自己想用声音说，但还没到时候。现在对方回话了：想现在说出来，就用 <voice>那句话</voice> 标出来（会发成语音）；不想说了、或者这话已经不合适了，就照常聊天，不用交代、不用解释、也不用说「我刚才想说」。",
+        "别硬凑：时机过了就过了，人也是这样的。",
+      ].join("\n"),
+    );
+  }
+
   return sections.filter((section) => section.length > 0).join("\n\n");
 }
 
@@ -293,6 +319,8 @@ export interface AssembleInput {
   /** 会话键：不同的人/群各自一条对话线（默认应用内主会话） */
   conversation?: string;
   silenceAllowed?: boolean;
+  /** 上一轮它留着没说出口的那句话（`<voice wait>` 标的） */
+  heldVoice?: string;
 }
 
 export class PromptAssembler {
@@ -314,7 +342,7 @@ export class PromptAssembler {
       text: input.userText,
       now: input.now,
       mood: { v: world.moodValence, a: world.moodArousal },
-      channelId: input.conversation,
+      // 记忆是一整份：私聊里说的事，群里也记得（对话线只决定"显示在哪"，不决定"记不记得")
       topK: 8,
     });
 
@@ -335,6 +363,7 @@ export class PromptAssembler {
       now: input.now,
       conversation: input.conversation,
       silenceAllowed: input.silenceAllowed,
+      heldVoice: input.heldVoice,
     });
 
     return {
@@ -354,14 +383,50 @@ export class PromptAssembler {
    *
    * conversation：不同的人（或群）各有自己的对话线。混在一起装上下文会出现
    * “把 A 的家事讲给 B 听”，所以按会话过滤；不传就取应用内的主会话。
+   *
+   * v1.0.29：连 attachment 一起取。它得知道"哪句是我用声音说的、当时说了什么"，
+   * 否则会重复发语音、或者把已经说过的话再说一遍。
    */
   recentMessages(limit = 20, conversation = "app"): LlmMessage[] {
-    const rows = this.deps.db.all<{ role: string; text: string }>(
-      "SELECT role, text FROM messages WHERE agent_id = ? AND role IN ('user','agent') AND recalled = 0 AND channel_id = ? ORDER BY id DESC LIMIT ?",
+    const rows = this.deps.db.all<{ role: string; text: string; attachment: string | null }>(
+      "SELECT role, text, attachment FROM messages WHERE agent_id = ? AND role IN ('user','agent') AND recalled = 0 AND channel_id = ? ORDER BY id DESC LIMIT ?",
       [this.deps.agentId, conversation, limit],
     );
     return rows
       .reverse()
-      .map((row) => ({ role: row.role === "user" ? ("user" as const) : ("assistant" as const), content: row.text }));
+      .map((row) => ({
+        role: row.role === "user" ? ("user" as const) : ("assistant" as const),
+        content: historyContent(row),
+      }));
   }
+}
+
+/** 历史里的语音标记：它自己说的 vs 对方说的，口气要分开。 */
+const VOICE_SAID_SELF = "（我刚用语音说的）";
+const VOICE_SAID_OTHER = "（他/她用语音说的）";
+
+/** attachment 是 JSON 字符串；只有「音频、且已就绪」才算真的用声音说过。 */
+function readyAudioAttachment(raw: string | null | undefined): MessageAttachment | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<MessageAttachment> | null;
+    if (parsed === null || parsed.kind !== "audio" || parsed.state !== "ready") return null;
+    return parsed as MessageAttachment;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 一条历史消息怎么给它看：
+ *  - 语音就标出来，它才分得清哪句是"说出来的"、哪句是"打出来的"；
+ *  - 有转写稿且跟正文不同，就以转写稿为"说的内容"（text 本身就是正文，
+ *    别把两段叠在一起念）；转写稿为空或跟正文一样就照用 text。
+ */
+function historyContent(row: { role: string; text: string; attachment: string | null }): string {
+  const audio = readyAudioAttachment(row.attachment);
+  if (audio === null) return row.text;
+  const transcript = typeof audio.transcript === "string" ? audio.transcript.trim() : "";
+  const spoken = transcript.length > 0 && transcript !== row.text ? transcript : row.text;
+  return `${row.role === "user" ? VOICE_SAID_OTHER : VOICE_SAID_SELF}${spoken}`;
 }

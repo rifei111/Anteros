@@ -19,12 +19,19 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import platform
 import re
 import subprocess
 import sys
+import tempfile
+
+try:  # Windows 专有的文件锁：保证同一时刻只有一个发送在动界面
+    import msvcrt
+except ImportError:  # pragma: no cover - 非 Windows 下退化为无锁
+    msvcrt = None  # type: ignore[assignment]
 import threading
 import time
 import traceback
@@ -32,6 +39,14 @@ from typing import Any, Dict, List, Optional
 
 SIDECAR_VERSION = "1.0.0"
 CHAT_DEFAULT = "filehelper"  # 文件传输助手：最安全的默认白名单
+
+# 便携版 Python（python-3.11.9-embed-amd64）带 python311._pth，这个文件一存在，
+# 解释器就不再自动把「脚本所在目录」放进 sys.path。于是 `import audio_out` 这种
+# 同级模块会 ModuleNotFoundError——本机调试时手动加过路径，装到应用里就暴露了。
+# 这里显式补一次，对所有同级模块（audio_out 等）都生效。
+_SELF_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SELF_DIR not in sys.path:
+    sys.path.insert(0, _SELF_DIR)
 
 # ----------------------------------------------------------------------------- 全局状态
 
@@ -47,6 +62,8 @@ class State:
         self.lock = threading.RLock()
         self._wechatauto_version: Optional[str] = None
         self._hello_done = False
+        self.voice_probe: Optional[Dict[str, Any]] = None
+        self.voice_probe_ts: float = 0.0
 
 
 STATE = State()
@@ -671,13 +688,32 @@ def method_poll(params: Dict[str, Any]) -> Dict[str, Any]:
         nick_cache[username] = text_value
         return text_value
 
+    # 内核传进来的是用户在设置里写的「会话标识」，可能是微信号（rifei111）、
+    # 昵称，也可能是 wxid_xxx / xxx@chatroom。数据库只认后者，所以这里必须先归一，
+    # 否则拿 rifei111 去查消息永远返回空——表现就是通道一切正常但一条消息都收不到。
+    resolved_cache: Dict[str, str] = {}
+
+    def resolve_target(username: str) -> str:
+        key = username.strip()
+        if not key:
+            return key
+        cached = resolved_cache.get(key)
+        if cached is not None:
+            return cached
+        resolved = normalize_username(key)
+        resolved_cache[key] = resolved
+        if resolved != key:
+            log(f"巡检会话归一：{key} → {resolved}")
+        return resolved
+
     for target in targets:
         username = target["username"]
         chat_since = max(int(target.get("sinceSeq") or 0), 0)
         next_seqs[username] = chat_since
+        db_username = resolve_target(username)
         is_group = target["kind"] == "group" or is_group_chat(username)
         try:
-            rows = db.get_new_messages(username, since_seq=chat_since, limit=limit) or []
+            rows = db.get_new_messages(db_username, since_seq=chat_since, limit=limit) or []
         except Exception as exc:  # noqa: BLE001
             error = f"{type(exc).__name__}: {exc}"
             continue
@@ -722,6 +758,10 @@ def method_poll(params: Dict[str, Any]) -> Dict[str, Any]:
 
 # 单条消息的发送上限：超过就当界面卡住，放弃这一条（内核那边还有自己的超时）
 SEND_TIMEOUT_SECONDS = 20.0
+# 一批最多等多久（首条）：上游拟人节流可能在发送前就 sleep 最多 75 秒
+BATCH_TIMEOUT_BASE_SECONDS = 90.0
+# 一次回复拆成多条时，每条之间的停顿（模拟人打字完一句再敲下一句）
+BATCH_SEND_STEP_SECONDS = 1.6
 WARMUP_TIMEOUT_SECONDS = 25.0
 
 
@@ -767,8 +807,15 @@ def _run_isolated(payload: Dict[str, Any], timeout_seconds: float) -> Dict[str, 
 
 
 def method_send(params: Dict[str, Any]) -> Dict[str, Any]:
+    raw_texts = params.get("texts")
+    texts: List[str] = []
+    if isinstance(raw_texts, list):
+        for item in raw_texts:
+            value = str(item or "").strip()
+            if value:
+                texts.append(value)
     text = str(params.get("text") or "").strip()
-    if not text:
+    if not texts and not text:
         return {"ok": False, "error": "不发送空文本"}
     raw = str(params.get("chatUsername") or STATE.chat_username or CHAT_DEFAULT)
     requested_title = str(params.get("chatTitle") or "").strip()
@@ -789,12 +836,19 @@ def method_send(params: Dict[str, Any]) -> Dict[str, Any]:
         "title": title,
         "verify": bool(params.get("verify")),
     }
+    if texts:
+        payload["texts"] = texts
     # 只在一种目标上试一次：以前失败后会换另一种写法重试，结果是「已经发出去了、
     # 但回读没确认上」时又发一遍，群里看到的就是同一条消息出现两次。
-    result = _run_isolated(payload, SEND_TIMEOUT_SECONDS)
+    # 预算要给够：上游拟人节流（rhythm.py）120 秒内写满 6 次后会真的 sleep 30–75 秒，
+    # 一条回复 6 段就可能撞上；宁可多等，也不要杀子进程导致「只发出去前三句」。
+    budget = BATCH_TIMEOUT_BASE_SECONDS + (BATCH_SEND_STEP_SECONDS + 20.0) * max(0, len(texts) - 1)
+    result = _run_isolated(payload, budget)
+    sent = int(result.get("sent") or 0) if isinstance(result, dict) else 0
     if result.get("ok"):
         return {
             "ok": True,
+            "sent": sent or (len(texts) if texts else 1),
             "chatUsername": username,
             "chatTitle": title,
             "detail": str(result.get("detail") or "")[:500],
@@ -806,6 +860,9 @@ def method_send(params: Dict[str, Any]) -> Dict[str, Any]:
         pass
     return {
         "ok": False,
+        # 发到一半失败时也要把「已经发出去几条」带回去：内核要按这个数把剩下的标成失败，
+        # 不然界面显示全部已发送，用户以为对方收到了。
+        "sent": sent,
         "chatUsername": username,
         "chatTitle": title,
         "error": str(result.get("error") or "发送失败")[:500],
@@ -827,6 +884,80 @@ def isolated_warmup(payload: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": True, "detail": "已打开 %s" % target}
     except BaseException as error:  # noqa: BLE001
         return {"ok": False, "error": "%s: %s" % (type(error).__name__, error)}
+
+
+SEND_LOCK_PATH = os.path.join(tempfile.gettempdir(), "anteros-wechat-send.lock")
+
+
+@contextlib.contextmanager
+def send_lock(timeout: float = 30.0):
+    """同一时刻只允许一个发送在动微信界面。
+
+    没有这把锁时，两条消息（不同对话、或上一轮的重试）会同时去点搜索框：
+    一个刚打开会话 A，另一个已经把消息粘进了 B 的输入框——用户看到的就是
+    「切换聊天时切换异常，还停在上一个聊天界面，消息发不出去」。
+    """
+    handle = open(SEND_LOCK_PATH, "a+b")
+    if msvcrt is None:  # pragma: no cover
+        try:
+            yield
+        finally:
+            handle.close()
+        return
+    deadline = time.time() + timeout
+    acquired = False
+    try:
+        while not acquired:
+            try:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                acquired = True
+            except OSError:
+                if time.time() >= deadline:
+                    raise RuntimeError("上一个发送还没结束（等了 %.0f 秒），这次先不发" % timeout)
+                time.sleep(0.15)
+        yield
+    finally:
+        if acquired:
+            try:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        handle.close()
+
+
+def _chat_key(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or ""))
+
+
+def current_chat_name(gui: Any) -> str:
+    for attribute in ("_current_chat", "current_chat", "_current_chat_title"):
+        value = getattr(gui, attribute, None)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _ensure_chat(gui: Any, target: str) -> bool:
+    """打开会话并确认界面真的切过去了；切不过去就返回 False（宁可不发，也别发错人）。"""
+    if not target:
+        return True
+    for attempt in (1, 2):
+        opened = False
+        try:
+            gui.open_chat(target)
+            opened = True
+        except BaseException:  # noqa: BLE001
+            opened = False
+        time.sleep(0.25 if attempt == 1 else 0.5)
+        current = current_chat_name(gui)
+        if current and _chat_key(current) == _chat_key(target):
+            return True
+        if not current and opened:
+            # 上游没暴露「当前会话」时只能信 open_chat 的返回，总比完全不发好
+            return True
+    return False
 
 
 def _restore_window(gui: Any) -> None:
@@ -853,7 +984,21 @@ def _restore_window(gui: Any) -> None:
 
 
 def isolated_send(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """子进程里真正干活的那一半：恢复窗口、打开会话、粘贴、回车。"""
+    """子进程里真正干活的那一半：恢复窗口、打开会话、粘贴、回车。
+
+    payload 里可以给 "texts"（一次发多条）：这样一次回复分成几条气泡时，
+    只会搜一次会话、只打开一次窗口，而不是每条都搜一遍——用户能看见搜索框
+    被点两次，既慢又难看。
+    """
+    texts: List[str] = []
+    raw_texts = payload.get("texts")
+    if isinstance(raw_texts, list):
+        for item in raw_texts:
+            value = str(item or "").strip()
+            if value:
+                texts.append(value)
+    if texts:
+        return isolated_send_many(payload, texts)
     text = str(payload.get("text") or "")
     title = str(payload.get("title") or "")
     username = str(payload.get("username") or "")
@@ -861,21 +1006,29 @@ def isolated_send(payload: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": "不发送空文本"}
     import wechatauto.guia as gui_module  # type: ignore
 
-    gui = gui_module.WeChatGUI()
-    _restore_window(gui)
     target = title or username or None
-    opened = False
+    with send_lock():
+        return _send_locked(text, target, gui_module)
+
+
+def _send_locked(text: str, target: Optional[str], gui_module: Any) -> Dict[str, Any]:
+    """在发送锁里做事：恢复窗口 → 切会话并确认 → 粘贴。"""
     try:
-        if target:
-            try:
-                gui.open_chat(target)
-                opened = True
-            except Exception:  # noqa: BLE001
-                opened = False
+        gui = gui_module.WeChatGUI()
+        _restore_window(gui)
+    except BaseException as error:  # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(error).__name__, error)}
+    if target and not _ensure_chat(gui, target):
+        return {
+            "ok": False,
+            "error": "没能切到会话「%s」：界面上还停在上一个聊天，已放弃发送（避免发错人）" % target,
+        }
+    opened = bool(target)
+    try:
         # 刻意不要求上游「数据库回读确认」：它会等 8 秒，然后回一个「消息已操作发送，
         # 但数据库未确认」的失败。把它当失败去重试，就会同一条消息发两遍。
         #
-        # 已经 open_chat 过就不要再把 who 传给 send_msg：上游会拿 who 再搜一次会话，
+        # 已经切过会话就不要再把 who 传给 send_msg：上游会拿 who 再搜一次会话，
         # 界面上能看到「搜索白名单用户」这个动作做两遍。
         if opened:
             response = gui.send_msg(text, verify=False)
@@ -896,6 +1049,669 @@ def isolated_send(payload: Dict[str, Any]) -> Dict[str, Any]:
         # 上游已经动了键盘、只是回读没确认上：算发出去，别重发
         ok = True
     return {"ok": bool(ok), "detail": detail, "error": None if ok else detail}
+
+def isolated_send_many(payload: Dict[str, Any], texts: List[str]) -> Dict[str, Any]:
+    """一次打开会话，连发多条。少搜几次会话，也少抢几次前台。"""
+    title = str(payload.get("title") or "")
+    username = str(payload.get("username") or "")
+    import time as time_module
+    import wechatauto.guia as gui_module  # type: ignore
+
+    target = title or username or None
+    with send_lock():
+        try:
+            gui = gui_module.WeChatGUI()
+            _restore_window(gui)
+        except BaseException as error:  # noqa: BLE001
+            return {"ok": False, "error": "%s: %s" % (type(error).__name__, error)}
+        if target and not _ensure_chat(gui, target):
+            return {
+                "ok": False,
+                "sent": 0,
+                "error": "没能切到会话「%s」：界面上还停在上一个聊天，已放弃发送（避免发错人）" % target,
+                "detail": "",
+            }
+        opened = bool(target)
+        sent = 0
+        last_detail = ""
+        for index, value in enumerate(texts):
+            if index > 0:
+                time_module.sleep(BATCH_SEND_STEP_SECONDS)
+            try:
+                if opened:
+                    response = gui.send_msg(value, verify=False)
+                elif target:
+                    response = gui.send_msg(value, who=target, verify=False)
+                else:
+                    response = gui.send_msg(value, verify=False)
+            except BaseException as error:  # noqa: BLE001
+                return {
+                    "ok": False,
+                    "sent": sent,
+                    "error": "%s: %s" % (type(error).__name__, error),
+                    "detail": last_detail,
+                }
+            detail = str(response)[:300]
+            ok = True
+            for attribute in ("success", "ok", "sent"):
+                attribute_value = getattr(response, attribute, None)
+                if isinstance(attribute_value, bool):
+                    ok = attribute_value
+                    break
+            if not ok and ("已操作发送" in detail or "已发送" in detail or "成功" in detail):
+                ok = True
+            last_detail = detail
+            if ok:
+                sent += 1
+            else:
+                return {"ok": False, "sent": sent, "error": detail, "detail": detail}
+        return {"ok": sent == len(texts), "sent": sent, "detail": last_detail, "error": None}
+
+
+# ----------------------------------------------------------------------------- 语音条
+# 思路（docs/微信语音条.md）：微信客户端只从"系统默认录音设备"采集，录完自己编码
+# SILK 上传。所以我们把合成好的 wav 播进虚拟声卡（CABLE Input），微信那一头从
+# CABLE Output 收到的就是我们的话；同时用键盘"按住右 Alt"让它进入录音态，
+# 按住时长 = 音频时长。全程不注入、不改微信内存，客户端始终是个黑盒。
+
+VOICE_PROBE_TTL_SECONDS = 300.0
+
+
+def _enable_dpi_awareness() -> None:
+    """子进程默认不是 DPI 感知的：不设这个，GetWindowRect 给的是逻辑坐标，
+    而 SetCursorPos 要物理坐标，点击会整体偏移（实验台上踩过）。"""
+    import ctypes
+
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+        return
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_AUDIO_OUT: Any = None
+
+
+def _audio_out() -> Any:
+    """拿 audio_out 模块：便携版 Python 的 sys.path 不可靠，实在找不到就按文件路径加载。"""
+    global _AUDIO_OUT
+    if _AUDIO_OUT is not None:
+        return _AUDIO_OUT
+    try:
+        import audio_out as module  # type: ignore
+    except ModuleNotFoundError:
+        import importlib.util
+
+        path = os.path.join(_SELF_DIR, "audio_out.py")
+        spec = importlib.util.spec_from_file_location("audio_out", path)
+        if spec is None or spec.loader is None:
+            raise ModuleNotFoundError("找不到 audio_out.py：%s" % path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)  # type: ignore[union-attr]
+        sys.modules["audio_out"] = module
+    _AUDIO_OUT = module
+    return module
+
+
+def _voice_probe(force: bool = False) -> Dict[str, Any]:
+    """虚拟声卡桥接自检（带缓存）：默认录音设备真的能听到我们播进去的声音吗。"""
+    with STATE.lock:
+        cached = STATE.voice_probe
+        cached_ts = STATE.voice_probe_ts
+    if cached and not force and (time.time() - cached_ts) < VOICE_PROBE_TTL_SECONDS:
+        return cached
+    try:
+        result = _audio_out().bridge_probe()
+    except BaseException as error:  # noqa: BLE001
+        result = {"ok": False, "error": "%s: %s" % (type(error).__name__, error)}
+    with STATE.lock:
+        STATE.voice_probe = result
+        STATE.voice_probe_ts = time.time()
+    return result
+
+
+def method_voice_status(params: Dict[str, Any]) -> Dict[str, Any]:
+    probe = _voice_probe(bool(params.get("force")))
+    return {
+        "ok": bool(probe.get("ok")),
+        "playbackDevice": probe.get("playbackDevice"),
+        "rms": probe.get("rms"),
+        "message": probe.get("message") or probe.get("error") or "自检没有结果",
+    }
+
+
+def _foreground_hwnd() -> int:
+    import ctypes
+
+    try:
+        return int(ctypes.windll.user32.GetForegroundWindow() or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _force_foreground(hwnd: int, timeout: float = 2.5) -> bool:
+    """把微信抢到最前。SetForegroundWindow 会被"前台锁"拒掉，所以加 AttachThreadInput 兜底。"""
+    import ctypes
+
+    if hwnd <= 0:
+        return False
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    try:
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+    except Exception:  # noqa: BLE001
+        pass
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _foreground_hwnd() == hwnd:
+            return True
+        try:
+            current = kernel32.GetCurrentThreadId()
+            target = user32.GetWindowThreadProcessId(hwnd, None)
+            user32.AttachThreadInput(current, target, True)
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            user32.AttachThreadInput(current, target, False)
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.15)
+    return _foreground_hwnd() == hwnd
+
+
+class _ForegroundPin:
+    """按住说话期间，持续把微信钉在前台。
+
+    真机上反复见到同一种失败：按住的那两秒里别的窗口（浏览器、本应用）把前台抢回去，
+    微信当场取消录音，结果"按了、松了、什么都没发出去"，而回读什么都看不到。
+    所以从按下到松开之间每 150ms 检查一次，被抢就再抢回来。
+    """
+
+    def __init__(self, hwnd: int, interval: float = 0.15) -> None:
+        self.hwnd = hwnd
+        self.interval = interval
+        self.stolen = 0
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                if self.hwnd > 0 and _foreground_hwnd() != self.hwnd:
+                    self.stolen += 1
+                    _force_foreground(self.hwnd, timeout=0.6)
+            except BaseException:  # noqa: BLE001
+                pass
+            self._stop.wait(self.interval)
+
+    def __enter__(self) -> "_ForegroundPin":
+        self._thread = threading.Thread(target=self._loop, name="anteros-fg-pin", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+
+def _voice_fail_shot() -> str:
+    """失败时留一张现场截图，下次用户报"没发出去"能直接看当时界面在哪。"""
+    try:
+        from PIL import ImageGrab  # type: ignore
+
+        root = os.environ.get("ANTEROS_DATA_DIR") or tempfile.gettempdir()
+        folder = os.path.join(root, "logs")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, "voice-last-fail.png")
+        ImageGrab.grab(all_screens=True).save(path)
+        return path
+    except BaseException:  # noqa: BLE001
+        return ""
+
+
+def _main_hwnd() -> int:
+    """找不到 gui.hwnd 时自己找一个：可见、标题是「微信/WeChat」的顶层窗。"""
+    try:
+        import win32gui  # type: ignore
+
+        hits: List[int] = []
+        win32gui.EnumWindows(
+            lambda handle, _extra: (
+                hits.append(handle)
+                if win32gui.IsWindowVisible(handle) and win32gui.GetWindowText(handle) in ("微信", "WeChat", "Weixin")
+                else None
+            ),
+            None,
+        )
+        return int(hits[0]) if hits else 0
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _click_chat_input(hwnd: int) -> bool:
+    """点一下聊天输入框：按住说话需要键盘焦点在聊天窗口上。"""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    client = wintypes.RECT()
+    if not user32.GetClientRect(hwnd, ctypes.byref(client)):
+        return False
+    origin = wintypes.POINT(0, 0)
+    if not user32.ClientToScreen(hwnd, ctypes.byref(origin)):
+        return False
+    width = int(client.right - client.left)
+    height = int(client.bottom - client.top)
+    if width < 200 or height < 200:
+        return False
+    x = int(origin.x + width * 0.55)
+    y = int(origin.y + height * 0.88)
+    user32.SetCursorPos(x, y)
+    time.sleep(0.08)
+    user32.mouse_event(0x0002, 0, 0, 0, 0)  # LEFTDOWN
+    time.sleep(0.05)
+    user32.mouse_event(0x0004, 0, 0, 0, 0)  # LEFTUP
+    time.sleep(0.2)
+    return True
+
+
+def _press_right_alt(down: bool) -> None:
+    """按下/松开右 Alt。
+
+    两件事都是真机上踩出来的：
+    1) **必须带 KEYEVENTF_EXTENDEDKEY**：右 Alt 是扩展键，不带这个标志 Windows 把它当左 Alt
+       （菜单键），微信毫无反应。
+    2) **必须用 keybd_event，不能用 SendInput**：实测同一台机器上 SendInput 注入的
+       wVk=0xA5 + 扩展标志，微信的键盘钩子不认（还会让输入框失去焦点，像是按了什么菜单键），
+       而 keybd_event + 扫描码走同一条路微信就认。别"优化"成 SendInput。
+    """
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    vk_rmenu = 0xA5
+    keyeventf_extendedkey = 0x0001
+    keyeventf_keyup = 0x0002
+    flags = keyeventf_extendedkey | (0 if down else keyeventf_keyup)
+    user32.keybd_event(vk_rmenu, user32.MapVirtualKeyW(vk_rmenu, 0), flags, 0)
+    return
+
+
+def _current_chat_title() -> str:
+    """读微信当前打开的会话名（读不到就回空串）。发语音前必须核对，否则可能发错人。"""
+    try:
+        import wechatauto.guia as gui_module  # type: ignore
+
+        uia = getattr(gui_module, "uia", None)
+        if uia is not None and hasattr(uia, "current_chat"):
+            return str(uia.current_chat() or "").strip()
+    except BaseException:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _chat_title_matches(target: str, current: str) -> bool:
+    if not target:
+        return True
+    if not current:
+        return True  # 读不到就不拦，交给后面的回读兜底
+    left = target.strip()
+    right = current.strip()
+    return left == right or left in right or right in left
+
+
+def _newest_seq(username: str) -> int:
+    """按下之前记一条水位：回读时只看水位之后的新消息。"""
+    db = load_db()
+    if db is None or not username:
+        return 0
+    try:
+        rows = db.get_messages(username, limit=1) or []
+    except BaseException:  # noqa: BLE001
+        return 0
+    if not rows:
+        return 0
+    return int(rows[0].get("sort_seq") or rows[0].get("seq") or 0)
+
+
+def _voice_row_ok(row: Dict[str, Any], duration_ms: int) -> bool:
+    content = str(row.get("content") or "")
+    match = re.search(r'voicelength="(\d+)"', content)
+    length = int(match.group(1)) if match else 0
+    if length <= 0:
+        return False
+    if abs(length - max(duration_ms, 1)) <= 4000:
+        return True
+    # 时长对不上但确实是语音：微信按播放时长记，宽一点也比"当成没发出去"好
+    return length >= 300
+
+
+def _verify_voice_since(username: str, duration_ms: int, since_seq: int) -> Dict[str, Any]:
+    """回读水位之后的新消息里有没有我刚发出的那条语音。
+
+    以前是"看最新一条"，可最新一条常常是刚发出去的文字，于是把成功的语音判成失败、
+    又退回发一遍文字。现在按水位过滤，只看按下之后的新消息。
+    """
+    db = load_db()
+    if db is None:
+        return {"checked": False, "ok": True, "detail": "数据库没打开，跳过回读"}
+    if not username:
+        return {"checked": False, "ok": True, "detail": "没有会话 wxid，跳过回读"}
+    try:
+        rows = db.get_new_messages(username, since_seq=since_seq, limit=10) or []
+    except BaseException as error:  # noqa: BLE001
+        return {"checked": False, "ok": True, "detail": "回读失败：%s: %s" % (type(error).__name__, error)}
+    self_wxid = str(getattr(db, "wxid", "") or "")
+    for row in reversed(rows):
+        kind = str(row.get("type") or "")
+        if "语音" not in kind:
+            continue
+        sender = str(row.get("sender_username") or "")
+        if self_wxid and sender and sender != self_wxid:
+            continue
+        if not _voice_row_ok(row, duration_ms):
+            continue
+        content = str(row.get("content") or "")
+        match = re.search(r'voicelength="(\d+)"', content)
+        return {
+            "checked": True,
+            "ok": True,
+            "type": kind,
+            "voicelength": int(match.group(1)) if match else 0,
+            "createTime": int(row.get("create_time") or 0),
+            "detail": content[:200],
+        }
+    tail = ""
+    if rows:
+        tail = str(rows[-1].get("content") or "")[:200]
+        last_kind = str(rows[-1].get("type") or "")
+    else:
+        last_kind = ""
+    return {
+        "checked": True,
+        "ok": False,
+        "type": last_kind,
+        "voicelength": 0,
+        "detail": tail or "水位之后没有新消息",
+    }
+
+
+def isolated_voice(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """子进程里发一条语音条：切会话 → 抢前台 → 点输入框 → 按住右 Alt → 播 wav → 松开。"""
+    wav = str(payload.get("wav") or "")
+    title = str(payload.get("title") or "")
+    username = str(payload.get("username") or "")
+    duration_ms = int(payload.get("durationMs") or 0)
+    if not wav or not os.path.isfile(wav):
+        return {"ok": False, "error": "要发的音频文件不存在：%s" % wav}
+    try:
+        _enable_dpi_awareness()
+        audio = _audio_out()
+        import wechatauto.guia as gui_module  # type: ignore
+
+        gui = gui_module.WeChatGUI()
+        _restore_window(gui)
+    except BaseException as error:  # noqa: BLE001
+        return {"ok": False, "error": "%s: %s" % (type(error).__name__, error)}
+
+    target = title or username
+    if target and not _ensure_chat(gui, target):
+        return {
+            "ok": False,
+            "error": "没能切到会话「%s」：界面上还停在上一个聊天，已放弃发送（避免发错人）" % target,
+        }
+    # 切完再核一次：真机上见过"以为切过去了、其实还停在上一个聊天"，
+    # 那种情况下按住说话会把语音发到别人那里，所以宁可放弃。
+    current = _current_chat_title()
+    if title and not _chat_title_matches(title, current):
+        return {
+            "ok": False,
+            "error": "界面停在「%s」，不是要发的「%s」：已放弃发送（避免发错人）" % (current or "未知会话", title),
+        }
+    hwnd = int(getattr(gui, "hwnd", 0) or 0) or _main_hwnd()
+
+    def press_once() -> Dict[str, Any]:
+        """按一次「按住说话」：抢前台 → 点输入框 → 按住右 Alt → 播 wav → 松开。"""
+        if not _force_foreground(hwnd):
+            return {"ok": False, "error": "微信窗口抢不到前台：按住说话必须让窗口在最前面"}
+        if not _click_chat_input(hwnd):
+            return {"ok": False, "error": "点不到聊天输入框（窗口尺寸异常？）"}
+        played_local: Dict[str, Any] = {}
+        with send_lock(90.0):
+            with _ForegroundPin(hwnd) as pin:
+                _press_right_alt(True)
+                try:
+                    played_local = audio.play_wav(
+                        wav, "CABLE Input", timeout_seconds=max(20.0, duration_ms / 1000.0 + 30.0)
+                    )
+                finally:
+                    time.sleep(0.2)
+                    _press_right_alt(False)
+                played_local["foregroundStolen"] = pin.stolen
+                if pin.stolen > 0:
+                    played_local["note"] = "按住期间前台被抢走 %d 次（已抢回）" % pin.stolen
+        return played_local
+
+    playbacks: list = []
+    verify: Dict[str, Any] = {}
+    for attempt in range(2):
+        # 每次按下之前都重新取一次水位：只看这次按下之后新出现的消息
+        base_seq = _newest_seq(username)
+        played = press_once()
+        playbacks.append(played)
+        if not played.get("ok"):
+            return {"ok": False, "error": "音频没播出来：%s" % played.get("error")}
+        # 松开之后微信还要编码 + 上传，通常 2~4 秒才在库里出现；给到 15 秒
+        got = False
+        for _round in range(15):
+            time.sleep(1.0)
+            verify = _verify_voice_since(username, duration_ms, base_seq)
+            if verify.get("checked") and verify.get("ok"):
+                got = True
+                break
+        if got:
+            return {
+                "ok": True,
+                "durationMs": int(played.get("durationMs") or duration_ms),
+                "verify": verify,
+                "attempts": attempt + 1,
+                "detail": "语音条已发送（%s 秒，回读 %sms）"
+                % (
+                    round(int(played.get("durationMs") or duration_ms) / 1000.0, 1),
+                    (verify or {}).get("voicelength") or "?",
+                ),
+            }
+        # 第一次没成，可能是前台被抢走/没进录音态：再补一次
+        if attempt == 0:
+            time.sleep(1.0)
+
+    shot = _voice_fail_shot()
+    return {
+        "ok": False,
+        "error": "语音没发出去（回读：%s）" % str(verify.get("detail") or "")[:200],
+        "playback": playbacks[-1] if playbacks else {},
+        "verify": verify,
+        "attempts": len(playbacks),
+        "screenshot": shot,
+    }
+
+
+def method_voice_send(params: Dict[str, Any]) -> Dict[str, Any]:
+    wav = str(params.get("wav") or "")
+    if not wav or not os.path.isabs(wav):
+        return {"ok": False, "error": "音频路径必须是绝对路径（内核给的是 dataDir 下的 wav）"}
+    if not os.path.isfile(wav):
+        return {"ok": False, "error": "要发的音频文件不存在：%s" % wav}
+    size = os.path.getsize(wav)
+    if size <= 0:
+        return {"ok": False, "error": "音频是空文件"}
+    if size > 8 * 1024 * 1024:
+        return {"ok": False, "error": "音频太大（%.1f MB），微信语音条装不下" % (size / 1048576.0)}
+    duration_ms = int(params.get("durationMs") or 0)
+    if duration_ms <= 0:
+        return {"ok": False, "error": "没给时长（微信按按住时长决定语音条长度）"}
+    duration_ms = max(300, min(60_000, duration_ms))
+
+    probe = _voice_probe(False)
+    if not probe.get("ok"):
+        return {
+            "ok": False,
+            "error": "虚拟声卡没接好：%s" % (probe.get("message") or probe.get("error") or "自检失败"),
+        }
+
+    raw = str(params.get("chatUsername") or STATE.chat_username or CHAT_DEFAULT)
+    requested_title = str(params.get("chatTitle") or "").strip()
+    with STATE.lock:
+        username = normalize_username(raw)
+        configured = normalize_username(str(STATE.chat_username or ""))
+    title = requested_title or resolve_chat_title(username) or ""
+    if username and configured and username == configured and not title:
+        title = STATE.chat_title or ""
+
+    payload: Dict[str, Any] = {
+        "action": "voice",
+        "wav": wav,
+        "username": username,
+        "title": title,
+        "durationMs": duration_ms,
+    }
+    budget = duration_ms / 1000.0 + 45.0
+    result = _run_isolated(payload, budget)
+    if result.get("ok"):
+        return {
+            "ok": True,
+            "chatUsername": username,
+            "chatTitle": title,
+            "durationMs": int(result.get("durationMs") or duration_ms),
+            "voicelength": (result.get("verify") or {}).get("voicelength"),
+            "detail": str(result.get("detail") or "")[:300],
+        }
+    return {
+        "ok": False,
+        "chatUsername": username,
+        "chatTitle": title,
+        "error": str(result.get("error") or "语音发送失败")[:500],
+    }
+
+
+# ----------------------------------------------------------------------------- 虚拟声卡安装
+# 微信发语音条的前提是本机有虚拟声卡（VB-CABLE）：合成音频播进 CABLE Input，
+# 微信从 CABLE Output 录。老机器早就装好了，新机器要能一键装——这一节只做
+# 「怎么找到随应用带的驱动包、怎么提权跑那一个安装程序」。
+
+# 驱动包可能在的三处：环境变量指定（调试/绿色版）、打包后的 resources、仓库里。
+VBCABLE_ENV_DIR = "ANTEROS_VBCABLE_DIR"
+VBCABLE_SETUP_NAMES = ("VBCABLE_Setup_x64.exe", "VBCABLE_Setup.exe")
+# 装驱动是异步的：安装程序自己还会再起子进程，父进程立刻返回 33 之类的假成功。
+# 所以不看它的返回值，直接盯设备列表。
+SOUNDCARD_POLL_SECONDS = 2.0
+SOUNDCARD_POLL_TIMEOUT_SECONDS = 120.0
+
+
+def _vbcable_dirs() -> List[str]:
+    """驱动包目录的候选清单（按优先级）。
+
+    注意：`ANTEROS_VBCABLE_DIR` 一旦设了就**只认它**，不再往后落。否则调用方给的
+    「空目录」会掉到仓库里的 release/vbcable 上，真的弹一次 UAC 去装驱动——
+    在测试里这就是事故。
+    """
+    override = str(os.environ.get(VBCABLE_ENV_DIR) or "").strip()
+    if override:
+        return [os.path.abspath(override)]
+    return [
+        # 打包后：resources/integrations/vbcable（sidecar 在 resources/app/integrations/… 下）
+        os.path.abspath(os.path.join(_SELF_DIR, "..", "..", "..", "resources", "integrations", "vbcable")),
+        # 仓库里调试：<repo 根>/release/vbcable
+        os.path.abspath(os.path.join(_SELF_DIR, "..", "..", "release", "vbcable")),
+    ]
+
+
+def _find_setup_in(directory: str) -> Optional[str]:
+    """在一个目录里找安装程序，优先 x64。驱动包解开后常还套一层（…/vbcable/pack/），
+    所以顺带看一层子目录：只认「目录本身 + 它的直接子目录」，不递归全盘。
+    """
+    if not directory or not os.path.isdir(directory):
+        return None
+    roots: List[str] = [directory]
+    try:
+        roots += [os.path.join(directory, name) for name in sorted(os.listdir(directory))]
+    except OSError:
+        pass
+    # 先在整个候选里找 x64，再退 32 位——不能因为先遍历到 pack 里的 32 位版就用了它。
+    for name in VBCABLE_SETUP_NAMES:
+        for root in roots:
+            path = os.path.join(root, name)
+            if os.path.isfile(path):
+                return path
+    return None
+
+
+def _find_vbcable_setup() -> Optional[str]:
+    for directory in _vbcable_dirs():
+        found = _find_setup_in(directory)
+        if found:
+            return found
+    return None
+
+
+def method_soundcard_status(params: Dict[str, Any]) -> Dict[str, Any]:
+    """只读：本机虚拟声卡装成什么样，「声音」页的「重新检测」按它。"""
+    state = dict(_audio_out().soundcard_state())
+    # bundled 额外带上：界面靠它决定显不显示「一键安装」（没有驱动包就只给下载地址）。
+    state["bundled"] = _find_vbcable_setup() is not None
+    return state
+
+
+def method_install_soundcard(params: Dict[str, Any]) -> Dict[str, Any]:
+    """一键装虚拟声卡：提权跑随应用带的安装程序，然后盯设备列表直到出现两头。
+
+    全程只启动那一个 exe、参数固定 `-i -h`（静默安装），不拼任何 shell 命令——
+    路径里可能有空格和中文，拼字符串迟早出事。
+    """
+    exe = _find_vbcable_setup()
+    if not exe:
+        return {"ok": False, "bundled": False, "message": "本地没有驱动包，这个安装包可能被裁剪了"}
+
+    audio = _audio_out()
+    if audio.soundcard_state().get("installed"):
+        return {"ok": True, "message": "虚拟声卡已经装好了"}
+
+    import ctypes
+
+    workdir = os.path.dirname(exe)
+    try:
+        shell32 = ctypes.windll.shell32
+        # 不设 restype 会被截成 32 位 int：x64 下拿到的数值可能是个负数，
+        # 「>32 就算启动成功」的判据就失真了。
+        shell32.ShellExecuteW.restype = ctypes.c_void_p
+        raw = shell32.ShellExecuteW(None, "runas", exe, "-i -h", workdir, 1)
+    except Exception as error:  # noqa: BLE001 - 起不来也要如实回一句，不能抛给界面
+        return {"ok": False, "message": "起不来安装程序：%s: %s" % (type(error).__name__, error)}
+    launched = int(raw or 0)
+    if launched <= 32:
+        # ShellExecute 约定：<=32 是失败码；用户点了「否」就是 ERROR_CANCELLED(5)。
+        return {"ok": False, "needsAdmin": True, "message": "装驱动需要管理员权限，刚才的弹窗被拒绝了"}
+
+    deadline = time.time() + SOUNDCARD_POLL_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        time.sleep(SOUNDCARD_POLL_SECONDS)
+        try:
+            if audio.soundcard_state().get("installed"):
+                return {
+                    "ok": True,
+                    "needsRestart": True,
+                    "message": "虚拟声卡装好了，需要重启微信、再重启本应用才会认到设备",
+                }
+        except Exception:  # noqa: BLE001 - 设备列表偶发读不到，继续等下一轮
+            pass
+    return {
+        "ok": False,
+        "message": "安装程序已启动但两分钟内没看到设备，可能还在后台装；装完重启微信再点重新检测",
+    }
 
 
 def method_warmup(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -951,6 +1767,10 @@ METHODS = {
     "doctor": method_doctor,
     "list-chats": method_list_chats,
     "inspect": method_inspect,
+    "voice.send": method_voice_send,
+    "voice.status": method_voice_status,
+    "soundcard.status": method_soundcard_status,
+    "soundcard.install": method_install_soundcard,
 }
 
 
@@ -1023,7 +1843,12 @@ def main() -> None:
                     payload_text = file_handle.read()
             payload = json.loads(payload_text or "{}")
             action = str(payload.get("action") or "send")
-            result = isolated_warmup(payload) if action == "warmup" else isolated_send(payload)
+            if action == "warmup":
+                result = isolated_warmup(payload)
+            elif action == "voice":
+                result = isolated_voice(payload)
+            else:
+                result = isolated_send(payload)
             print(json.dumps(result, ensure_ascii=False))
         except BaseException as error:  # noqa: BLE001
             print(json.dumps({"ok": False, "error": "%s: %s" % (type(error).__name__, error)}, ensure_ascii=False))

@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { startApp } from "./lib/app";
 import { useAppState } from "./lib/store";
+import { applyTheme, readThemeChoice, watchSystemTheme } from "./lib/theme";
 import { ChatShell } from "./components/ChatShell";
 import { Connecting } from "./components/Connecting";
 import { ConsentGate } from "./components/ConsentGate";
@@ -16,6 +17,15 @@ export function App() {
   const state = useAppState();
 
   useEffect(() => startApp(), []);
+
+  // 主题在 main.tsx 里已于首帧前写入；这里只负责跟随系统变化。
+  useEffect(
+    () =>
+      watchSystemTheme(() => {
+        if (readThemeChoice() === "system") applyTheme("system");
+      }),
+    [],
+  );
 
   return (
     <div className="app-root">
