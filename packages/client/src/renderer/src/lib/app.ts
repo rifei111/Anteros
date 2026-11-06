@@ -419,6 +419,8 @@ function wireEvents(): () => void {
     subscribe("event.part", (payload) => {
       // 分条文本只走 event.message（气泡唯一真源）；这里只维持「正在输入」，
       // 不累积任何文本，否则同一句话会被 stream.parts 与 messages 各画一遍。
+      // 外部通道正在回别人的消息时，别在这边也显示「正在写」（v1.1.3）。
+      if (payload.conversation && payload.conversation !== getState().activeConversation) return;
       setState((previous) => ({
         stream: {
           turnId: payload.turnId,
@@ -431,6 +433,9 @@ function wireEvents(): () => void {
 
   cleanups.push(
     subscribe("event.typing", (payload) => {
+      if (payload.state !== "stop" && payload.conversation && payload.conversation !== getState().activeConversation) {
+        return;
+      }
       if (payload.state === "transcribe") {
         setState((previous) => ({
           stream: {
@@ -665,6 +670,8 @@ export async function sendMessage(rawText: string, quote: ChatMessage | null): P
       return { messages };
     });
     void markReadNow();
+    // 兜底：这一轮已经结束了，「正在写…」不该再挂着（内核也会发 stop，双保险）。
+    setState((previous) => (previous.stream?.typing ? { stream: null } : {}));
     return true;
   } catch (error) {
     setState((previous) => ({
@@ -737,6 +744,8 @@ export async function sendVoice(clip: RecordedClip): Promise<boolean> {
       return { messages };
     });
     void markReadNow();
+    // 兜底：这一轮已经结束了，「正在写…」不该再挂着（内核也会发 stop，双保险）。
+    setState((previous) => (previous.stream?.typing ? { stream: null } : {}));
     return true;
   } catch (error) {
     setState((previous) => ({

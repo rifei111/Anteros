@@ -1365,3 +1365,124 @@ C 只做了壳（选择账本、曝光记账、roster、冲动触发、L6 有限
 - 只动样式，不动人格数据、不动 RPC、不改取值与钳制逻辑；库里数值一个字节没变。
 - 同类隐患已一并核对：`.field-row` 里的 `.field` 原本就有例外规则；`.voice-grid` 用的是 `<label>` 包输入框，
   不用 `.field`，不受影响。
+
+## 51. v1.1.2 增补（虚拟声卡：随包携带 + 下载按钮）
+
+### 51.1 现象
+
+用户报「虚拟声卡没有下载按钮」。声音页「虚拟声卡」一块在驱动目录为空时只有一句提示文字
+（「这个安装包没带驱动，请到 vb-audio.com 下载」），没有任何可点的按钮——用户被卡在装驱动这一步。
+
+### 51.2 根因
+
+- `release/win-unpacked/resources/integrations/` 里只有 `wechatauto-sidecar`，没有 `vbcable`：
+  `electron-builder.yml` 的 `extraResources` 是 `from: ../../integrations to: integrations`，
+  而驱动包放在 `release/vbcable/`（被 `.gitignore` 忽略），从来没进过仓库。
+- 旁路 `_find_vbcable_setup()` 于是返回 `None` → `soundcard.status` 的 `bundled` 为 false →
+  客户端按「没有安装按钮」的分支渲染，只剩一句文字。
+
+### 51.3 实现
+
+- 驱动随包：官网原包复制为 `integrations/vbcable/VBCABLE_Driver_Pack43.zip`（1.09 MB，不拆不改），
+  被 `extraResources` 自动带进 `resources/integrations/vbcable`。
+- `integrations/wechatauto-sidecar/sidecar.py`：
+  - `_vbcable_dirs()` 候选顺序：`ANTEROS_VBCABLE_DIR`（设了只认它）→ 包内 `resources/integrations/vbcable`
+    → 仓库 `release/vbcable` → 数据目录下的下载缓存。
+  - `_unpack_bundled_vbcable()`：候选目录里有 `*vb*.zip` 就解到 `_vbcable_download_dir()`（数据目录下 `vbcable`），
+    再回安装程序路径；`_find_vbcable_setup()` 找不到 exe 时回落到它。
+  - `_download_vbcable()`：两个官方地址依次试，UA 与 90 秒超时，下到临时文件后校验 100 KB–32 MB
+    （太小按错误页处理），解压到数据目录；`ANTEROS_VBCABLE_DIR` 设了直接回绝（测试不联网）。
+  - 新方法 `soundcard.download` → `method_soundcard_download`；`soundcard.install` 找不到 exe 时先下载再装。
+- 内核：`channels.wechat.downloadSoundcard`（超时 180 秒，owner 权限 + 审计 `soundcard.download`）。
+- 客户端：声音页未安装时两个按钮并列——「下载驱动包」+「一键安装虚拟声卡」；
+  `bundled === true` 时说明「已经带着驱动包，直接点安装，不联网也能装」。
+
+### 51.4 验证
+
+- 旁路测试新增 2 组 8 条：只有 zip 时 `_find_vbcable_setup()` 能解出 `VBCABLE_Setup_x64.exe`、
+  文件真实存在、解压落在 `ANTEROS_DATA_DIR`、`bundled` 为 true；指定目录时 `soundcard.download` 回绝且
+  理由提到 `ANTEROS_VBCABLE_DIR`。`[voice] 全部通过`。
+- 真机下载：`method_soundcard_download({})` 2.4 秒、`{"ok": true, "downloaded": true, "message": "驱动包已下载（1112 KB）"}`。
+- 打包后核对：`release/win-unpacked/resources/integrations/vbcable/VBCABLE_Driver_Pack43.zip` 存在；
+  从 `release/win-unpacked/resources/integrations/wechatauto-sidecar` 直接加载旁路（不设任何环境变量），
+  `found: <数据目录>/vbcable/VBCABLE_Setup_x64.exe`、`exists: true`、`bundled: true`。
+- `npm run typecheck` 三包通过；`npm test` 27 文件 194 例全绿；`npm run lint` 通过。
+- `Anteros-Setup-1.1.2-x64.exe`（118.79 MB）+ blockmap；`scripts/package-check.mjs` 25 通过 0 警告 0 错误。
+
+### 51.5 边界
+
+- 不静默联网：只在用户点「下载驱动包」或点安装且本机没有安装程序时才下载。
+- 不静默提权：安装仍走 `ShellExecuteW(runas)`，会弹 UAC；被拒时回 `needsAdmin`。
+- 不吞错误：两个源都失败时把每个源的失败原因拼成一句返回，界面原样显示。
+
+## 52. v1.1.3 增补（会话搜索 / 语音档位 / typing 收尾 / 群聊归属 / 逐条即发）
+
+### 52.1 范围
+
+用户 2026-11-06 报的四条（m18320、m18395）：
+1. 先在某个窗口发完文字，再发语音时会重新搜索一次会话 → 当前目标窗口已经是它就直接发。
+2. 声音页选"纯文字"时界面仍生成语音（只是没发到微信）。
+3. 有时一直显示"正在输入中"但什么都不输出。
+4. 群聊里自己在应用内发的话被当成群成员的消息。
+外加一条优化：一个气泡生成完就直接送到聊天窗口。
+
+### 52.2 实现
+
+- `integrations/wechatauto-sidecar/sidecar.py` `_ensure_chat()`：先比当前会话（`_current_chat_title()` / `current_chat_name(gui)` 的 `_chat_key`），一致就直接返回，不 `open_chat`。三处调用方（`isolated_send` / `isolated_send_many` / `isolated_voice`）共用。
+- `packages/kernel/src/services/chat.ts`：`outboundVoiceDecision()` 先看档位——`status.voiceOutbound === "off"` 时外部通道也不出声；投递循环包 `try/finally` 保证发 `event.typing stop`；`event.part` / `event.typing` 带 `conversation`；`onPart` 回调扩展成 `(text, index, meta: { voice, hold, messageId })`。
+- `packages/kernel/src/app.ts`：`onInbound` 改为"写好一条就转一条"（`decideReply !== true` 时才抢跑，auto 模式要等整轮判 `<不回>`）；第一条语音之后停止抢跑，剩下的按 `part_index` 顺序补发；`dropVoice(messageId)` 在语音发送失败时撤掉界面上的语音气泡并退回发文字。
+- `packages/client/src/renderer/src/components/Bubble.tsx`：新增 `fromMe = isUser && !senderName && !senderId`，群聊里我发的仍在右边、不带"群成员"昵称。
+- `packages/client/src/renderer/src/lib/app.ts`：`event.part` / `event.typing` 按 `conversation` 过滤；一次发送结束后兜底清掉 typing。
+
+### 52.3 验证
+
+- `npm run typecheck` 三包通过；`npm test` 27 文件 195 例绿（新增群聊"我自己那条在右边"1 例）；`npm run lint` ok；`npm run test:sidecar` 全过。
+- `npm run package` → `release/Anteros-Setup-1.1.3-x64.exe`；`scripts/package-check.mjs` 25 通过 0 警告 0 错误。
+
+### 52.4 边界
+
+- 逐条即发只在"必须回"的模式下生效；"自己决定回不回"仍整轮攒着，否则模型先说一句"不回"就已经发出去了。
+- 语音那条始终等合成完成再发，且它后面的文字排队等它，顺序不会乱。
+- 会话标题比对口味保守：比对不上就照原路搜索，不会因为改名/同名把话发错人。
+
+## 53. v1.1.4 增补（发一条字不再搜一次）
+
+### 53.1 现象
+
+v1.1.3 的"写好一条就转一条"上线后，用户报：每发一条文字，微信界面上搜索框就点开一次；
+一句回复分四条，眼前闪过四次搜索。语音条紧跟文字时也是同样的问题。
+
+### 53.2 根因
+
+每次发送都在新的 Python 子进程里跑，`WeChatGUI()` 是新对象，上游记录的 `_current_chat`
+永远是空的；`_current_chat_title()` 走 UIA 也读不到（微信窗口最小化时连 hwnd 都取不到）。
+于是"已经在目标会话上就别再搜"这条判据从来没有命中过，每条都老老实实搜一遍。
+
+### 53.3 实现
+
+- `integrations/wechatauto-sidecar/sidecar.py`：
+  - 新增 `_chat_state_path()`（`ANTEROS_DATA_DIR` 或 `%APPDATA%\Anteros` 下的 `wechat-last-chat.json`）、
+    `_read_chat_state()` / `_write_chat_state()` / `_clear_chat_state()` / `_chat_state_matches()`，
+    `_CHAT_STATE_TTL_SECONDS = 120`；
+  - `_ensure_chat(gui, target, username="")` 三道判断：界面读得到且是目标 → 直接发；两分钟内刚发过同一会话
+    → 直接发（置 `_ENSURE_VIA_CACHE`）；都不是才 `open_chat` 搜一次，成功后落盘；
+  - `_send_locked(text, target, gui_module, username="")`：发成功后落盘；若这次是跳过搜索发的，
+    用 `_verify_text_sent(username, text)` 回读目标会话最新一条，对不上则清记录并报失败（发错人是底线）；
+  - `isolated_send_many` / `isolated_voice` 成功路径同样落盘，并把 username 传进 `_ensure_chat`。
+- 测试 `integrations/wechatauto-sidecar/test_sidecar_send_lock.py`：数据目录指到临时目录
+  （`ANTEROS_DATA_DIR`），新增 `test_ensure_chat_skips_search_when_recently_sent`（`open_chat` 一次都不调）、
+  `test_ensure_chat_searches_again_when_state_is_stale`（过期要重搜），并在每个用例前重置状态。
+
+### 53.4 验证
+
+- `test_sidecar_send_lock.py`：9 项全过；`npm run test:sidecar` 三组全过。
+- `npm test` 27 文件 195 例绿；`npm run build` / `npm run package` → `release/Anteros-Setup-1.1.4-x64.exe`；
+  `scripts/package-check.mjs` 25 通过 0 警告 0 错误；包内 `sidecar.py` 84,466 字节，含缓存与回读代码。
+- 真机：连续两条发到「文件传输助手」，第一条 7.23s（含搜会话），第二条 4.29s（跳过搜索），
+  两条都 `ok: true`，`wechat-last-chat.json` 已落盘。
+
+### 53.5 边界
+
+- 只信两分钟。超过两分钟或换了会话，仍然照原路搜一次——界面可能早被人点走了，不能赌。
+- 跳过搜索的那一次必须回读确认；回读不到（数据库没打开、刚写库有延迟）按"没冤枉它"处理，不误报失败。
+- 微信窗口最小化时读不到当前会话名，这时缓存是唯一的判据来源，TTL 之外一律重搜。

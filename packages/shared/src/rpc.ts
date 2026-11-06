@@ -358,10 +358,18 @@ export interface KernelApi {
       playbackDevice?: string;
       /** 录音端名字，例如 CABLE Output (VB-Audio Virtual Cable) */
       captureDevice?: string;
-      /** 驱动包是否随应用一起打包（可以一键装）；为 false 时只能给下载地址 */
+      /** 驱动包是否随应用一起打包（离线可装）；为 false 时靠「下载驱动」按钮现下 */
       bundled: boolean;
       message: string;
     }
+  >;
+  /**
+   * 下载虚拟声卡驱动包（VB-CABLE，约 1 MB，从 vb-audio.com）。只下载、不安装：
+   * 装的时候还要弹 UAC，分成两个动作用户更好理解「下好了没」和「装上了没」。
+   */
+  "channels.wechat.downloadSoundcard": MethodSpec<
+    Record<string, never>,
+    { ok: boolean; downloaded?: boolean; bundled?: boolean; message: string }
   >;
   /**
    * 一键安装虚拟声卡。会弹一次 UAC（装驱动必须提权），装着的时候要先关掉微信，
@@ -656,7 +664,16 @@ export interface PluginHostApi {
 
 export interface KernelEvents {
   "event.message": ChatMessage;
-  "event.part": { turnId: number; index: number; total: number; text: string; delayAfterMs: number; typingMs: number };
+  "event.part": {
+    turnId: number;
+    index: number;
+    total: number;
+    text: string;
+    delayAfterMs: number;
+    typingMs: number;
+    /** 这条回复属于哪个会话：界面只给当前打开的那个会话显示「正在写」 */
+    conversation?: string;
+  };
   "event.typing": {
     /**
      * start/stop 是"正在写"；transcribe 是"正在听你那条语音"——
@@ -665,6 +682,8 @@ export interface KernelEvents {
     state: "start" | "stop" | "transcribe";
     plannedMs?: number;
     plannedChars?: number;
+    /** 哪个会话在写：外部通道回消息时，不该让「本机会话」也显示正在写 */
+    conversation?: string;
   };
   "event.recall": { messageId: number; replacement: string };
   "event.presence": WorldState;

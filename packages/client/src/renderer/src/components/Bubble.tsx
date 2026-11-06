@@ -51,10 +51,12 @@ export function Bubble({
 
   const isUser = message.role === "user";
   const failed = message.delivery === "failed";
+  // 群聊里我自己发的那条没有发送者信息（senderName/senderId 都空）：它是「我」，不是群成员。
+  const fromMe = isUser && !message.senderName && !message.senderId;
   // 群聊里它占右边（你在群里是旁观者），其他群成员的消息带昵称与首字头像在左边；
   // 私聊保持原样：你说的话在右、它说的话在左。
-  const onRight = groupMode ? !isUser : isUser;
-  const senderLabel = groupMode && isUser ? message.senderName || message.senderId || "群成员" : "";
+  const onRight = groupMode ? !isUser || fromMe : isUser;
+  const senderLabel = groupMode && isUser && !fromMe ? message.senderName || message.senderId || "群成员" : "";
   // 气泡样式跟"在哪一侧"走，而不是跟角色走：
   // 群聊里群成员在左边，如果用用户色（绿底 + 右侧尖角），尖角会朝外，看着就是反的。
   const bubbleClass = onRight ? "bubble-user" : "bubble-agent";

@@ -67,6 +67,22 @@ describe("群聊气泡布局", () => {
     expect(mine).not.toContain("avatar-member");
   });
 
+  it("群聊里我自己发的那条在右边，不算群成员（v1.1.3 修）", () => {
+    const html = renderToStaticMarkup(
+      <Bubble
+        message={message({ role: "user", senderName: null, senderId: null })}
+        agentName="小满"
+        groupMode
+        onContextMenu={noop}
+        onResend={noop}
+      />,
+    );
+    expect(html).toContain("msg-right");
+    expect(html).not.toContain("msg-sender");
+    expect(html).not.toContain("群成员");
+    expect(html).not.toContain("avatar-member");
+  });
+
   it("没拿到昵称时退回微信号，不显示空白头像", () => {
     const html = renderToStaticMarkup(
       <Bubble

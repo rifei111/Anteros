@@ -28,6 +28,8 @@ export function VoiceTab() {
   const [busy, setBusy] = useState(false);
   // 一键装虚拟声卡是独立动作：装的时候只锁这一块，别把整页输入都禁掉。
   const [installing, setInstalling] = useState(false);
+  // 下载驱动包与安装分开：先下到数据目录，再由用户点安装（安装要弹 UAC）。
+  const [downloading, setDownloading] = useState(false);
   const [installMessage, setInstallMessage] = useState<string>("");
   const [installWarn, setInstallWarn] = useState(false);
   const [voices, setVoices] = useState<VoiceOption[] | null>(null);
@@ -173,6 +175,23 @@ export function VoiceTab() {
     }
   };
 
+  const downloadSoundcard = async (): Promise<void> => {
+    setDownloading(true);
+    setInstallMessage("");
+    setInstallWarn(false);
+    try {
+      const result = await invoke("channels.wechat.downloadSoundcard", {});
+      setInstallMessage(result.message);
+      setInstallWarn(result.ok === false);
+      // 下好之后 bundled 会翻成 true：徽章与按钮文案跟着变。
+      soundcard.reload();
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   const installSoundcard = async (): Promise<void> => {
     setInstalling(true);
     setInstallMessage("");
@@ -247,15 +266,28 @@ export function VoiceTab() {
         ) : (
           <>
             <p className="muted">{card.message}</p>
+            <div className="voice-mode-row">
+              <button
+                className="btn btn-sm"
+                onClick={() => void downloadSoundcard()}
+                disabled={downloading || installing}
+              >
+                {downloading ? "正在下载…" : "下载驱动包"}
+              </button>
+              <button
+                className="btn btn-sm btn-primary"
+                onClick={() => void installSoundcard()}
+                disabled={downloading || installing}
+              >
+                {installing ? "正在安装…" : "一键安装虚拟声卡"}
+              </button>
+            </div>
             {card.bundled === true ? (
-              <div className="voice-mode-row">
-                <button className="btn btn-sm btn-primary" onClick={() => void installSoundcard()} disabled={installing}>
-                  {installing ? "正在安装…" : "一键安装虚拟声卡"}
-                </button>
-              </div>
+              <p className="muted">这个安装包已经带着驱动包，直接点安装就行，不联网也能装。</p>
             ) : (
               <p className="muted">
-                这个安装包没带驱动，请到 vb-audio.com 下载 VB-CABLE，装完回来点重新检测。
+                这个安装包没带驱动。点「下载驱动包」会从 vb-audio.com 下（约 1 MB）到本机数据目录，
+                下好再点安装；装的时候才需要联管理员权限。
               </p>
             )}
           </>

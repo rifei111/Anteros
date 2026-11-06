@@ -190,9 +190,38 @@ export class App {
           key,
           label: chatTitle || chatUsername,
           run: async () => {
-            // 「自己决定回不回」：先把分条攒着，等它写完再决定发不发。
-            // 直接边写边发的话，模型先说了一句「不回」也已经被送出去了。
+            const chatLabel = chatTitle || chatUsername;
+            // 分条暂存（按 part_index 落位）与每条对应的消息 id：发送失败要按 id 标失败/撤语音
             const buffered: string[] = [];
+            const messageIds = new Map<number, number>();
+            const holdIndexes = new Set<number>();
+            const streamed = new Set<number>();
+            // 「自己决定回不回」的模式必须攒完整轮才知道它是不是只回了「不回」；
+            // 其他模式可以一边写一边发（用户 2026-11-06：一个气泡生成完就直接送到聊天窗口）。
+            let streaming = decideReply !== true;
+            let chain: Promise<void> = Promise.resolve();
+            const sendOne = (index: number, part: string): void => {
+              if (part.length === 0) return;
+              streamed.add(index);
+              chain = chain
+                .then(async () => {
+                  const outcome = await this.wechat.sendMany([part], chatUsername);
+                  const sentCount = typeof outcome.sent === "number" ? outcome.sent : 1;
+                  if (outcome.ok && sentCount >= 1) return;
+                  // 这条没发出去：库里标失败，界面别显示「已发送」其实对方没收到
+                  const messageId = messageIds.get(index);
+                  if (messageId !== undefined) {
+                    this.deps.db.run("UPDATE messages SET delivery = 'failed' WHERE id = ?", [messageId]);
+                    this.emit("event.message", this.chat.getMessage(messageId));
+                  }
+                  this.deps.log.warn(
+                    `[wechat] ${chatLabel}：第 ${index + 1} 条没发出去（${outcome.error ?? "旁路没说原因"}）`,
+                  );
+                })
+                .catch((error: unknown) => {
+                  this.deps.log.warn(`[wechat] ${chatLabel}：发送出错 ${(error as Error)?.message ?? String(error)}`);
+                });
+            };
             const result = await this.chat.send({
               text,
               eventId: `wechat:${externalId}`,
@@ -200,9 +229,22 @@ export class App {
               // 群聊：谁说的要落库、也要进上下文
               author: senderName ? { name: senderName, id: senderId ?? null } : undefined,
               silenceAllowed: decideReply === true,
-              // 先全都攒着：整段写完再一次发出去。
-              // 边写边发的话，一条回复拆成两条气泡就要打开会话两次（群里能看到搜两次会话）。
-              onPart: (part) => void buffered.push(part),
+              // 分条一写好就往外发；但第一条语音之后就不再抢跑——
+              // 后面的文字要是先出去，语音就排到最后了，读起来顺序是乱的。
+              onPart: (part, index, meta) => {
+                buffered[index] = part;
+                messageIds.set(index, meta.messageId);
+                if (meta.hold) {
+                  // 攒着没说出口的那句：不落聊天窗口，也不发出去
+                  holdIndexes.add(index);
+                  return;
+                }
+                if (meta.voice) {
+                  streaming = false;
+                  return;
+                }
+                if (streaming) sendOne(index, part);
+              },
             });
             if (buffered.length === 0) return;
             const joined = buffered.join("").replace(/\s+/g, "");
@@ -211,102 +253,50 @@ export class App {
               if (/^[<＜]?不回[>＞]?$/.test(joined)) {
                 // 决定不回：把这条 turn 落库的气泡删掉，界面上不留「<不回>」这种鬼话
                 this.deps.db.run("DELETE FROM messages WHERE turn_id = ?", [result.turnId]);
-                this.deps.log.info(`[wechat] ${chatTitle || chatUsername}：它决定这次不回`);
+                this.deps.log.info(`[wechat] ${chatLabel}：它决定这次不回`);
                 return;
               }
             }
-            // 发出去之后要看结果：旁路会把「发了 3 条、挂了」当成正常返回，
-            // 以前这里直接丢掉返回值，用户看到的就是「只发了前三句」。
-            // 语音条一句一条（用户 2026-11-04）：标了语音的那几句发语音，其余照常打字，互不吞。
+            // 剩下的按 part_index 顺序补发：文字逐条送、语音一句一条；
+            // 语音失败就把那句话退回去打字，并把界面上的语音气泡撤掉（用户 2026-11-06 报过这个）。
             const voices = result.voices ?? [];
             const voiceByIndex = new Map(voices.map((item) => [item.index, item]));
-            const markFailed = (indexes: number[], why: string): void => {
-              if (indexes.length === 0) return;
-              try {
-                const holes = indexes.map(() => "?").join(",");
-                this.deps.db.run(
-                  `UPDATE messages SET delivery = 'failed' WHERE turn_id = ? AND part_index IN (${holes})`,
-                  [result.turnId, ...indexes],
-                );
-                const failed = this.deps.db.all<{ id: number }>(
-                  `SELECT id FROM messages WHERE turn_id = ? AND part_index IN (${holes}) ORDER BY part_index`,
-                  [result.turnId, ...indexes],
-                );
-                for (const row of failed) this.emit("event.message", this.chat.getMessage(row.id));
-              } catch (error) {
-                this.deps.log.warn(`[wechat] 标记失败消息出错：${(error as Error)?.message ?? String(error)}`);
+            const ordered = Object.keys(buffered)
+              .map((item) => Number(item))
+              .sort((a, b) => a - b);
+            const markOneFailed = (index: number, why: string): void => {
+              const messageId = messageIds.get(index);
+              if (messageId !== undefined) {
+                this.deps.db.run("UPDATE messages SET delivery = 'failed' WHERE id = ?", [messageId]);
+                this.emit("event.message", this.chat.getMessage(messageId));
               }
-              this.deps.log.warn(`[wechat] ${chatTitle || chatUsername}：${why}`);
+              this.deps.log.warn(`[wechat] ${chatLabel}：${why}`);
             };
-            if (voices.length > 0) {
-              // 按原来的顺序一条条走：文字攒成一批再发（少开几次会话），语音一句一条单独发。
-              let batch: string[] = [];
-              let batchIndexes: number[] = [];
-              const flush = async (): Promise<void> => {
-                if (batch.length === 0) return;
-                const texts = batch.slice();
-                const indexes = batchIndexes.slice();
-                batch = [];
-                batchIndexes = [];
-                const outcome = await this.wechat.sendMany(texts, chatUsername);
-                const sentCount = typeof outcome.sent === "number" ? outcome.sent : texts.length;
-                if (!outcome.ok || sentCount < texts.length) {
-                  // 没发出去的那几条，库里也标成失败：不然界面显示「已发送」，其实对方没收到
-                  markFailed(
-                    indexes.slice(sentCount),
-                    `文字只发出去 ${sentCount}/${texts.length} 条（${outcome.error ?? "旁路没说原因"}）`,
-                  );
-                }
-              };
-              for (let index = 0; index < buffered.length; index += 1) {
-                const item = voiceByIndex.get(index);
-                const text = buffered[index] ?? "";
-                if (!item) {
-                  batch.push(text);
-                  batchIndexes.push(index);
-                  continue;
-                }
-                await flush();
-                const sent = await this.wechat.sendVoice(item.path, item.durMs, chatUsername);
-                if (sent.ok) {
-                  this.deps.log.info(
-                    `[wechat] ${chatTitle || chatUsername}：语音条已发出（第 ${index} 条，${Math.round((sent.voicelength ?? item.durMs) / 100) / 10}s）`,
-                  );
-                  continue;
-                }
-                // 语音没发出去：把这一句的话退回去发文字，绝不因为语音坏了把话弄丢
-                this.deps.log.warn(`[wechat] 语音条没发出去（${sent.error ?? "未知原因"}），这一句退回发文字`);
-                if (text.length === 0) continue;
-                const retry = await this.wechat.sendMany([text], chatUsername);
-                const retrySent = typeof retry.sent === "number" ? retry.sent : 1;
-                if (!retry.ok || retrySent < 1) {
-                  markFailed([index], "这一句的语音和退回的文字都没发出去");
-                }
+            for (const index of ordered) {
+              if (streamed.has(index) || holdIndexes.has(index)) continue;
+              const partText = buffered[index] ?? "";
+              const item = voiceByIndex.get(index);
+              if (!item) {
+                sendOne(index, partText);
+                continue;
               }
-              await flush();
-              return;
-            }
-            const outcome = await this.wechat.sendMany(buffered, chatUsername);
-            const sentCount = typeof outcome.sent === "number" ? outcome.sent : buffered.length;
-            if (!outcome.ok || sentCount < buffered.length) {
-              // 没发出去的那几条，库里也标成失败：不然界面显示「已发送」，其实对方没收到
-              try {
-                this.deps.db.run(
-                  "UPDATE messages SET delivery = 'failed' WHERE turn_id = ? AND role = 'agent' AND part_index >= ?",
-                  [result.turnId, sentCount],
+              // 语音要等前面的文字真的出去了再发，否则顺序会乱
+              await chain;
+              const sent = await this.wechat.sendVoice(item.path, item.durMs, chatUsername);
+              if (sent.ok) {
+                this.deps.log.info(
+                  `[wechat] ${chatLabel}：语音条已发出（第 ${index + 1} 条，${Math.round((sent.voicelength ?? item.durMs) / 100) / 10}s）`,
                 );
-                const failed = this.deps.db.all<{ id: number }>(
-                  "SELECT id FROM messages WHERE turn_id = ? AND role = 'agent' AND delivery = 'failed' ORDER BY part_index",
-                  [result.turnId],
-                );
-                for (const row of failed) this.emit("event.message", this.chat.getMessage(row.id));
-              } catch (error) {
-                this.deps.log.warn(`[wechat] 标记失败消息出错：${(error as Error)?.message ?? String(error)}`);
+                continue;
               }
-              this.deps.log.warn(
-                `[wechat] ${chatTitle || chatUsername}：只发出去 ${sentCount}/${buffered.length} 条（${outcome.error ?? "旁路没说原因"}）`,
-              );
+              this.deps.log.warn(`[wechat] 语音条没发出去（${sent.error ?? "未知原因"}），这一句退回发文字`);
+              this.dropVoice(item.messageId);
+              if (partText.length === 0) continue;
+              const retry = await this.wechat.sendMany([partText], chatUsername);
+              const retrySent = typeof retry.sent === "number" ? retry.sent : 1;
+              if (!retry.ok || retrySent < 1) markOneFailed(index, "这一句的语音和退回的文字都没发出去");
             }
+            await chain;
           },
         });
       },
@@ -330,6 +320,19 @@ export class App {
   attachEmitter(emit: Emitter): void {
     this.emit = emit;
     (this.plugins as unknown as { attachEvents?: (handler: Emitter) => void }).attachEvents?.(emit);
+  }
+
+  /**
+   * 语音条没发出去：把这个气泡的语音撤掉，让界面退回一句纯文字。
+   * 用户报过「选了纯文字/发不出去，界面上还挂着一条语音」——那就是这里的 attachment 没撤。
+   */
+  private dropVoice(messageId: number): void {
+    try {
+      this.deps.db.run("UPDATE messages SET attachment = NULL WHERE id = ?", [messageId]);
+      this.emit("event.message", this.chat.getMessage(messageId));
+    } catch (error) {
+      this.deps.log.warn(`撤回语音气泡失败：${(error as Error)?.message ?? String(error)}`);
+    }
   }
 
   /**
@@ -855,6 +858,12 @@ export class App {
       /** 本机有没有虚拟声卡（VB-CABLE）：只读，不弹窗、不改任何东西。 */
       case "channels.wechat.soundcardStatus":
         return await this.wechat.soundcardStatus();
+      /** 下载虚拟声卡驱动包：只是往数据目录写文件，不装、不提权，但仍然算 owner 动作。 */
+      case "channels.wechat.downloadSoundcard": {
+        this.runtime.permissions.assertOwner("下载虚拟声卡驱动包");
+        this.runtime.audit.log("soundcard.download", { actorRole: "owner" });
+        return await this.wechat.downloadSoundcard();
+      }
       /** 一键装虚拟声卡：会弹一次 UAC 提权，所以是 owner 动作，并且留审计。 */
       case "channels.wechat.installSoundcard": {
         this.runtime.permissions.assertOwner("安装虚拟声卡驱动");

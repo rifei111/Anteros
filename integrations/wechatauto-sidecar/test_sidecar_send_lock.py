@@ -10,10 +10,15 @@ import importlib.util
 import logging
 import os
 import sys
+import tempfile
 import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# 「刚发过哪个会话」记在数据目录里的状态文件；测试时必须指到临时目录，
+# 否则会读到这台机器上真实发过的会话，把用例搅成随机的。
+os.environ["ANTEROS_DATA_DIR"] = tempfile.mkdtemp(prefix="anteros-sidecar-test-")
 
 logging.disable(logging.CRITICAL)
 
@@ -32,8 +37,10 @@ class FakeGUI:
         self.switchable = switchable
         self._current_chat = "别的会话"
         self.sent = []
+        self.opened: list = []
 
     def open_chat(self, target):
+        self.opened.append(target)
         if self.switchable and target in self.chats:
             self._current_chat = target
             return True
@@ -44,18 +51,48 @@ class FakeGUI:
         return type("Resp", (), {"success": True})()
 
 
+def _reset_chat_state():
+    sidecar._clear_chat_state()
+    sidecar._ENSURE_VIA_CACHE = False
+
+
 def test_ensure_chat_ok():
+    _reset_chat_state()
     gui = FakeGUI()
     assert sidecar._ensure_chat(gui, "沈知蓝") is True
     assert gui._current_chat == "沈知蓝"
 
 
 def test_ensure_chat_gives_up_when_it_cannot_switch():
+    _reset_chat_state()
     gui = FakeGUI(switchable=False)
     started = time.time()
     assert sidecar._ensure_chat(gui, "沈知蓝") is False
     # 两次尝试之后就该放弃，不能无限等
     assert time.time() - started < 5.0
+
+
+def test_ensure_chat_skips_search_when_recently_sent():
+    """刚往这个会话发过话，界面肯定还开着它：别再点开搜索框搜一次（用户在意的就是这个）。"""
+    _reset_chat_state()
+    sidecar._write_chat_state("wxid_shen", "沈知蓝")
+    gui = FakeGUI()
+    assert sidecar._ensure_chat(gui, "沈知蓝", "wxid_shen") is True
+    assert gui.opened == [], gui.opened  # 一次 open_chat 都没调
+
+
+def test_ensure_chat_searches_again_when_state_is_stale():
+    _reset_chat_state()
+    sidecar._write_chat_state("wxid_shen", "沈知蓝")
+    state = sidecar._read_chat_state()
+    state["ts"] = time.time() - sidecar._CHAT_STATE_TTL_SECONDS - 5
+    with open(sidecar._chat_state_path(), "w", encoding="utf-8") as handle:
+        import json
+
+        json.dump(state, handle)
+    gui = FakeGUI()
+    assert sidecar._ensure_chat(gui, "沈知蓝", "wxid_shen") is True
+    assert gui.opened == ["沈知蓝"], gui.opened
 
 
 def test_ensure_chat_empty_target_is_noop():
@@ -117,6 +154,7 @@ def test_send_lock_times_out_instead_of_hanging_forever():
 
 def test_isolated_send_refuses_when_chat_cannot_be_opened(monkeypatch_module=None):
     """切不过去时必须返回失败，而不是把消息粘到上一个聊天窗口里。"""
+    _reset_chat_state()
     gui = FakeGUI(switchable=False)
     module = type("GuiModule", (), {"WeChatGUI": staticmethod(lambda: gui)})
     result = sidecar._send_locked("测试一句", "沈知蓝", module)
@@ -126,12 +164,15 @@ def test_isolated_send_refuses_when_chat_cannot_be_opened(monkeypatch_module=Non
 
 
 def test_isolated_send_sends_after_switch():
+    _reset_chat_state()
     gui = FakeGUI()
     module = type("GuiModule", (), {"WeChatGUI": staticmethod(lambda: gui)})
     result = sidecar._send_locked("测试一句", "沈知蓝", module)
     assert result["ok"] is True
     assert gui.sent == ["测试一句"]
     assert gui._current_chat == "沈知蓝"
+    # 发完要把「刚发到哪儿」记下来，下一条才不用再搜
+    assert sidecar._read_chat_state().get("title") == "沈知蓝"
 
 
 def main():

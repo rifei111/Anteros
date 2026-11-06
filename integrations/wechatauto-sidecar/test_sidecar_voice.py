@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -136,6 +137,44 @@ def main() -> int:
             os.environ.pop("ANTEROS_VBCABLE_DIR", None)
         else:
             os.environ["ANTEROS_VBCABLE_DIR"] = saved_env
+
+    print("[soundcard] 只带了官网原包（zip）时，得能就地解开再用")
+    # 随安装包带的是官网原包，不拆开、不改内容；旁路要能自己解到数据目录。
+    repo_zip = os.path.join(HERE, "..", "..", "integrations", "vbcable", "VBCABLE_Driver_Pack43.zip")
+    if os.path.isfile(repo_zip):
+        zip_dir = tempfile.mkdtemp(prefix="anteros-vbcable-zip-")
+        data_dir = tempfile.mkdtemp(prefix="anteros-vbcable-data-")
+        shutil.copy2(repo_zip, os.path.join(zip_dir, "VBCABLE_Driver_Pack43.zip"))
+        saved_env = os.environ.get("ANTEROS_VBCABLE_DIR")
+        saved_data = os.environ.get("ANTEROS_DATA_DIR")
+        os.environ["ANTEROS_VBCABLE_DIR"] = zip_dir
+        os.environ["ANTEROS_DATA_DIR"] = data_dir
+        try:
+            found = sidecar._find_vbcable_setup()
+            check("只有 zip 时也能找到安装程序", bool(found), found)
+            check("解出来的安装程序真的在盘上", bool(found) and os.path.isfile(found), found)
+            check("解压落在数据目录下", data_dir in str(found), found)
+            status = sidecar.method_soundcard_status({})
+            check("解压后 bundled 为 True", status.get("bundled") is True, status)
+            print("[soundcard] 指定了驱动目录时不联网下载")
+            downloaded = sidecar.method_soundcard_download({})
+            check("指定目录时下载直接回绝", downloaded.get("ok") is False, downloaded)
+            check(
+                "回绝理由说清是环境变量",
+                "ANTEROS_VBCABLE_DIR" in str(downloaded.get("message")),
+                downloaded.get("message"),
+            )
+        finally:
+            if saved_env is None:
+                os.environ.pop("ANTEROS_VBCABLE_DIR", None)
+            else:
+                os.environ["ANTEROS_VBCABLE_DIR"] = saved_env
+            if saved_data is None:
+                os.environ.pop("ANTEROS_DATA_DIR", None)
+            else:
+                os.environ["ANTEROS_DATA_DIR"] = saved_data
+    else:
+        print("  （跳过：仓库里没有 integrations/vbcable/VBCABLE_Driver_Pack43.zip）")
 
     print("[voice] 便携版 Python 的 sys.path 不可靠，audio_out 得能靠文件路径加载")
     # 现象（v1.0.26 用户报障）：应用里跑 `import audio_out` 报 ModuleNotFoundError。

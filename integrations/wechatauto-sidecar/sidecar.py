@@ -931,6 +931,109 @@ def _chat_key(value: Any) -> str:
     return re.sub(r"\s+", "", str(value or ""))
 
 
+# 上一次真的发到哪个会话：跨进程记在盘上。
+# 每次发送都是一个新的 Python 子进程，`WeChatGUI()` 也是新对象，`_current_chat` 永远是空的，
+# 所以"界面上现在开着谁"读不到；不记盘的话每条消息都要重新点开搜索框搜一次（用户 2026-11-06 报的）。
+_CHAT_STATE_TTL_SECONDS = 120.0
+_ENSURE_VIA_CACHE = False
+
+
+def _chat_state_path() -> str:
+    base = os.environ.get("ANTEROS_DATA_DIR") or os.path.join(
+        os.environ.get("APPDATA") or tempfile.gettempdir(), "Anteros"
+    )
+    return os.path.join(base, "wechat-last-chat.json")
+
+
+def _read_chat_state() -> Dict[str, Any]:
+    try:
+        with open(_chat_state_path(), "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except BaseException:  # noqa: BLE001
+        return {}
+
+
+def _write_chat_state(username: str, title: str) -> None:
+    try:
+        path = _chat_state_path()
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        payload = {"username": username or "", "title": title or "", "ts": time.time()}
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+    except BaseException:  # noqa: BLE001
+        return
+
+
+def _clear_chat_state() -> None:
+    try:
+        os.remove(_chat_state_path())
+    except BaseException:  # noqa: BLE001
+        return
+
+
+def _chat_state_matches(state: Dict[str, Any], target: str, username: str) -> bool:
+    """盘上记的会话跟这次要发的是不是同一处。只看最近两分钟：时间长了界面早被人点走了。"""
+    if not state:
+        return False
+    try:
+        age = time.time() - float(state.get("ts") or 0)
+    except (TypeError, ValueError):
+        return False
+    if age < 0 or age > _CHAT_STATE_TTL_SECONDS:
+        return False
+    want_target = _chat_key(target)
+    want_username = _chat_key(username)
+    for field in ("title", "username"):
+        saved = _chat_key(state.get(field))
+        if not saved:
+            continue
+        if want_target and saved == want_target:
+            return True
+        if want_username and saved == want_username:
+            return True
+    return False
+
+
+def _last_self_text(username: str) -> str:
+    """读这个会话最新一条自己发的文字（回读确认用）。"""
+    db = load_db()
+    if db is None or not username:
+        return ""
+    try:
+        rows = db.get_messages(username, limit=4) or []
+    except BaseException:  # noqa: BLE001
+        return ""
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("is_self") is True or row.get("isSelf") is True:
+            return str(row.get("content") or "")
+    return ""
+
+
+def _verify_text_sent(username: str, text: str) -> bool:
+    """跳过搜索直接发时，回读一下这句话是不是真落在目标会话里。
+
+    万一这两分钟里有人手动把界面切到别的聊天，我们就会发错人——这是绝不能接受的。
+    宁可报失败让用户知道，也不装作发好了。
+    """
+    if not username:
+        return True
+    found = _last_self_text(username)
+    if not found:
+        # 回读不到（数据库没打开/刚写库有延迟）就别冤枉它
+        return True
+    want = re.sub(r"\s+", "", text)
+    got = re.sub(r"\s+", "", found)
+    if not want:
+        return True
+    head = want[:20]
+    return got.startswith(head) or head in got
+
+
 def current_chat_name(gui: Any) -> str:
     for attribute in ("_current_chat", "current_chat", "_current_chat_title"):
         value = getattr(gui, attribute, None)
@@ -939,9 +1042,25 @@ def current_chat_name(gui: Any) -> str:
     return ""
 
 
-def _ensure_chat(gui: Any, target: str) -> bool:
-    """打开会话并确认界面真的切过去了；切不过去就返回 False（宁可不发，也别发错人）。"""
+def _ensure_chat(gui: Any, target: str, username: str = "") -> bool:
+    """打开会话并确认界面真的切过去了；切不过去就返回 False（宁可不发，也别发错人）。
+
+    **已经在目标会话上就别再搜一次**：以前每条消息（含紧接着的语音条）都会点开搜索框
+    重新搜人，用户看到的是"发一条字，屏幕上搜一次"。这里三道判断，能省就省：
+    1. 界面上读得到当前会话名，且就是目标 → 直接发；
+    2. 两分钟内刚往这个会话发过（记在盘上的状态文件）→ 直接发，不再搜；
+    3. 都不是才真的去搜一次。
+    """
+    global _ENSURE_VIA_CACHE
+    _ENSURE_VIA_CACHE = False
     if not target:
+        return True
+    current = _current_chat_title() or current_chat_name(gui)
+    if current and _chat_key(current) == _chat_key(target):
+        _write_chat_state(username, target)
+        return True
+    if _chat_state_matches(_read_chat_state(), target, username):
+        _ENSURE_VIA_CACHE = True
         return True
     for attempt in (1, 2):
         opened = False
@@ -953,9 +1072,11 @@ def _ensure_chat(gui: Any, target: str) -> bool:
         time.sleep(0.25 if attempt == 1 else 0.5)
         current = current_chat_name(gui)
         if current and _chat_key(current) == _chat_key(target):
+            _write_chat_state(username, target)
             return True
         if not current and opened:
             # 上游没暴露「当前会话」时只能信 open_chat 的返回，总比完全不发好
+            _write_chat_state(username, target)
             return True
     return False
 
@@ -1008,17 +1129,19 @@ def isolated_send(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     target = title or username or None
     with send_lock():
-        return _send_locked(text, target, gui_module)
+        return _send_locked(text, target, gui_module, username)
 
 
-def _send_locked(text: str, target: Optional[str], gui_module: Any) -> Dict[str, Any]:
+def _send_locked(
+    text: str, target: Optional[str], gui_module: Any, username: str = ""
+) -> Dict[str, Any]:
     """在发送锁里做事：恢复窗口 → 切会话并确认 → 粘贴。"""
     try:
         gui = gui_module.WeChatGUI()
         _restore_window(gui)
     except BaseException as error:  # noqa: BLE001
         return {"ok": False, "error": "%s: %s" % (type(error).__name__, error)}
-    if target and not _ensure_chat(gui, target):
+    if target and not _ensure_chat(gui, target, username):
         return {
             "ok": False,
             "error": "没能切到会话「%s」：界面上还停在上一个聊天，已放弃发送（避免发错人）" % target,
@@ -1048,6 +1171,16 @@ def _send_locked(text: str, target: Optional[str], gui_module: Any) -> Dict[str,
     if not ok and ("已操作发送" in detail or "已发送" in detail or "成功" in detail):
         # 上游已经动了键盘、只是回读没确认上：算发出去，别重发
         ok = True
+    if ok and target:
+        _write_chat_state(username, target)
+        if _ENSURE_VIA_CACHE and not _verify_text_sent(username, text):
+            # 没搜会话就直接发了，结果目标会话里找不到这句话：多半界面被切到别处了。
+            # 这种事绝不能装作发好了（发错人是底线），报失败并清掉状态，让用户自己看。
+            _clear_chat_state()
+            return {
+                "ok": False,
+                "error": "「%s」里回读不到刚发的这句：界面可能被切到别的会話了" % target,
+            }
     return {"ok": bool(ok), "detail": detail, "error": None if ok else detail}
 
 def isolated_send_many(payload: Dict[str, Any], texts: List[str]) -> Dict[str, Any]:
@@ -1064,7 +1197,7 @@ def isolated_send_many(payload: Dict[str, Any], texts: List[str]) -> Dict[str, A
             _restore_window(gui)
         except BaseException as error:  # noqa: BLE001
             return {"ok": False, "error": "%s: %s" % (type(error).__name__, error)}
-        if target and not _ensure_chat(gui, target):
+        if target and not _ensure_chat(gui, target, username):
             return {
                 "ok": False,
                 "sent": 0,
@@ -1105,6 +1238,8 @@ def isolated_send_many(payload: Dict[str, Any], texts: List[str]) -> Dict[str, A
                 sent += 1
             else:
                 return {"ok": False, "sent": sent, "error": detail, "detail": detail}
+        if target and sent > 0:
+            _write_chat_state(username, target)
         return {"ok": sent == len(texts), "sent": sent, "detail": last_detail, "error": None}
 
 
@@ -1459,7 +1594,7 @@ def isolated_voice(payload: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": "%s: %s" % (type(error).__name__, error)}
 
     target = title or username
-    if target and not _ensure_chat(gui, target):
+    if target and not _ensure_chat(gui, target, username):
         return {
             "ok": False,
             "error": "没能切到会话「%s」：界面上还停在上一个聊天，已放弃发送（避免发错人）" % target,
@@ -1514,6 +1649,8 @@ def isolated_voice(payload: Dict[str, Any]) -> Dict[str, Any]:
                 got = True
                 break
         if got:
+            if target:
+                _write_chat_state(username, target)
             return {
                 "ok": True,
                 "durationMs": int(played.get("durationMs") or duration_ms),
@@ -1602,14 +1739,30 @@ def method_voice_send(params: Dict[str, Any]) -> Dict[str, Any]:
 # 微信发语音条的前提是本机有虚拟声卡（VB-CABLE）：合成音频播进 CABLE Input，
 # 微信从 CABLE Output 录。老机器早就装好了，新机器要能一键装——这一节只做
 # 「怎么找到随应用带的驱动包、怎么提权跑那一个安装程序」。
+#
+# 驱动包有两种来路：随安装包带着（离线可用），或者当场从官网下（安装包被裁剪、
+# 或者用户拿的是绿色版）。后者是「下载」按钮的后端。
 
-# 驱动包可能在的三处：环境变量指定（调试/绿色版）、打包后的 resources、仓库里。
+# 驱动包可能在的几处：环境变量指定（调试/绿色版）、打包后的 resources、仓库里、下载缓存。
 VBCABLE_ENV_DIR = "ANTEROS_VBCABLE_DIR"
 VBCABLE_SETUP_NAMES = ("VBCABLE_Setup_x64.exe", "VBCABLE_Setup.exe")
+# 官网驱动包（同一个文件，两个入口各试一次：download. 子域是国内偶尔更快的那个）。
+VBCABLE_DOWNLOAD_URLS = (
+    "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack43.zip",
+    "https://vb-audio.com/Cable/VBCABLE_Driver_Pack43.zip",
+)
+VBCABLE_DOWNLOAD_TIMEOUT_SECONDS = 90.0
+VBCABLE_DOWNLOAD_MAX_BYTES = 32 * 1024 * 1024
 # 装驱动是异步的：安装程序自己还会再起子进程，父进程立刻返回 33 之类的假成功。
 # 所以不看它的返回值，直接盯设备列表。
 SOUNDCARD_POLL_SECONDS = 2.0
 SOUNDCARD_POLL_TIMEOUT_SECONDS = 120.0
+
+
+def _vbcable_download_dir() -> str:
+    """下载来的驱动包放哪：数据目录下的 vbcable/（跟着用户数据走，升级不丢）。"""
+    root = os.environ.get("ANTEROS_DATA_DIR") or tempfile.gettempdir()
+    return os.path.join(root, "vbcable")
 
 
 def _vbcable_dirs() -> List[str]:
@@ -1627,6 +1780,8 @@ def _vbcable_dirs() -> List[str]:
         os.path.abspath(os.path.join(_SELF_DIR, "..", "..", "..", "resources", "integrations", "vbcable")),
         # 仓库里调试：<repo 根>/release/vbcable
         os.path.abspath(os.path.join(_SELF_DIR, "..", "..", "release", "vbcable")),
+        # 之前点过「下载驱动」：<数据目录>/vbcable
+        os.path.abspath(_vbcable_download_dir()),
     ]
 
 
@@ -1655,30 +1810,137 @@ def _find_vbcable_setup() -> Optional[str]:
         found = _find_setup_in(directory)
         if found:
             return found
+    # 只带了压缩包的（我们随包放的是官网原包，未解压、未改动）：解到数据目录再用。
+    return _unpack_bundled_vbcable()
+
+
+def _unpack_bundled_vbcable() -> Optional[str]:
+    """候选目录里有 VBCABLE_*.zip 时，解开到数据目录并回包内安装程序路径。
+
+    优先用随包的那个 zip：官网原包原样带着（不拆开、不改），解压一次就够，
+    之后 `_find_setup_in(_vbcable_download_dir())` 就能找到。
+    """
+    import zipfile
+
+    target = _vbcable_download_dir()
+    for directory in _vbcable_dirs():
+        if not os.path.isdir(directory):
+            continue
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        for name in names:
+            if not name.lower().endswith(".zip") or "vb" not in name.lower():
+                continue
+            archive_path = os.path.join(directory, name)
+            try:
+                with zipfile.ZipFile(archive_path) as archive:
+                    os.makedirs(target, exist_ok=True)
+                    archive.extractall(target)
+            except Exception:  # noqa: BLE001 - 包坏了就换下一个候选，不在这里抛
+                continue
+            found = _find_setup_in(target)
+            if found:
+                return found
     return None
+
+
+def _download_vbcable() -> Dict[str, Any]:
+    """从官网下一个驱动包，解开到数据目录，回包内安装程序的路径。
+
+    只在「本机没带驱动包」时用（安装包被裁剪、或用户拿的是绿色版）。下载失败不抛：
+    把每一处的失败原因按顺序攒起来回给界面——用户至少能分清是网络不通、还是地址变了。
+
+    `ANTEROS_VBCABLE_DIR` 设了就不下载：那个变量是「只认这个目录」的语义（测试与绿色版），
+    再往别处落文件既违背它，也会让测试偷偷连网。
+    """
+    if str(os.environ.get(VBCABLE_ENV_DIR) or "").strip():
+        return {"ok": False, "message": "已指定驱动目录（%s），不从这里下载" % VBCABLE_ENV_DIR}
+    target = _vbcable_download_dir()
+    existing = _find_setup_in(target)
+    if existing:
+        return {"ok": True, "setup": existing, "downloaded": False, "message": "本地已经有下载好的驱动包"}
+
+    import urllib.request
+    import zipfile
+
+    archive_path = os.path.join(tempfile.gettempdir(), "VBCABLE_Driver_Pack43.zip")
+    errors: List[str] = []
+    for url in VBCABLE_DOWNLOAD_URLS:
+        host = url.split("//")[-1].split("/")[0]
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "Anteros-Soundcard/1.0"})
+            with urllib.request.urlopen(request, timeout=VBCABLE_DOWNLOAD_TIMEOUT_SECONDS) as response:
+                payload = response.read(VBCABLE_DOWNLOAD_MAX_BYTES + 1)
+            if len(payload) > VBCABLE_DOWNLOAD_MAX_BYTES:
+                raise ValueError("下回来的文件超过预期大小，不像驱动包")
+            if len(payload) < 100_000:
+                raise ValueError("下回来的文件只有 %d 字节，多半是错误页而不是驱动包" % len(payload))
+            os.makedirs(target, exist_ok=True)
+            part_path = archive_path + ".part"
+            with open(part_path, "wb") as handle:
+                handle.write(payload)
+            with zipfile.ZipFile(part_path) as archive:
+                archive.extractall(target)
+            os.replace(part_path, archive_path)
+            setup = _find_setup_in(target)
+            if not setup:
+                raise ValueError("解开了但没有找到 VBCABLE_Setup_x64.exe")
+            return {
+                "ok": True,
+                "setup": setup,
+                "downloaded": True,
+                "message": "驱动包已下载（%d KB）" % (len(payload) // 1024),
+            }
+        except Exception as error:  # noqa: BLE001 - 换下一个地址，最后把原因一起回给界面
+            errors.append("%s → %s: %s" % (host, type(error).__name__, error))
+    return {"ok": False, "message": "下载驱动包失败：" + "；".join(errors)}
+
+
+def method_soundcard_download(params: Dict[str, Any]) -> Dict[str, Any]:
+    """「下载驱动」按钮：只下载、不安装。装不装由用户随后自己决定。"""
+    result = _download_vbcable()
+    ok = bool(result.get("ok"))
+    return {
+        "ok": ok,
+        "downloaded": bool(result.get("downloaded")),
+        "bundled": _find_vbcable_setup() is not None,
+        "message": str(result.get("message") or ("驱动包已就位" if ok else "下载失败")),
+    }
 
 
 def method_soundcard_status(params: Dict[str, Any]) -> Dict[str, Any]:
     """只读：本机虚拟声卡装成什么样，「声音」页的「重新检测」按它。"""
     state = dict(_audio_out().soundcard_state())
-    # bundled 额外带上：界面靠它决定显不显示「一键安装」（没有驱动包就只给下载地址）。
+    # bundled 额外带上：界面靠它决定「一键安装」和「下载驱动」哪个是主按钮。
     state["bundled"] = _find_vbcable_setup() is not None
     return state
 
 
 def method_install_soundcard(params: Dict[str, Any]) -> Dict[str, Any]:
-    """一键装虚拟声卡：提权跑随应用带的安装程序，然后盯设备列表直到出现两头。
+    """一键装虚拟声卡：提权跑安装程序，然后盯设备列表直到出现两头。
 
+    没有随包驱动时先下一份（用户点的是「一键安装」，不该再让他自己去官网翻）。
     全程只启动那一个 exe、参数固定 `-i -h`（静默安装），不拼任何 shell 命令——
     路径里可能有空格和中文，拼字符串迟早出事。
     """
+    downloaded = False
     exe = _find_vbcable_setup()
     if not exe:
-        return {"ok": False, "bundled": False, "message": "本地没有驱动包，这个安装包可能被裁剪了"}
+        fetched = _download_vbcable()
+        if not fetched.get("ok"):
+            return {
+                "ok": False,
+                "bundled": False,
+                "message": "本地没有驱动包，也没下载成：%s" % str(fetched.get("message") or "原因不明"),
+            }
+        exe = str(fetched.get("setup") or "")
+        downloaded = True
 
     audio = _audio_out()
     if audio.soundcard_state().get("installed"):
-        return {"ok": True, "message": "虚拟声卡已经装好了"}
+        return {"ok": True, "downloaded": downloaded, "message": "虚拟声卡已经装好了"}
 
     import ctypes
 
@@ -1703,6 +1965,7 @@ def method_install_soundcard(params: Dict[str, Any]) -> Dict[str, Any]:
             if audio.soundcard_state().get("installed"):
                 return {
                     "ok": True,
+                    "downloaded": downloaded,
                     "needsRestart": True,
                     "message": "虚拟声卡装好了，需要重启微信、再重启本应用才会认到设备",
                 }
@@ -1770,6 +2033,7 @@ METHODS = {
     "voice.send": method_voice_send,
     "voice.status": method_voice_status,
     "soundcard.status": method_soundcard_status,
+    "soundcard.download": method_soundcard_download,
     "soundcard.install": method_install_soundcard,
 }
 

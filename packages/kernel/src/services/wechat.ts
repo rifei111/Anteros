@@ -1682,6 +1682,31 @@ export class WechatChannelService {
   }
 
   /**
+   * 下载虚拟声卡驱动包（只下载、不安装）。官网那个包约 1 MB，网络差时可能几十秒，
+   * 所以超时给得比普通请求宽；失败原因原样带回界面，不吞。
+   */
+  async downloadSoundcard(): Promise<{ ok: boolean; downloaded?: boolean; bundled?: boolean; message: string }> {
+    if (!this.running) return { ok: false, message: "微信通道没有运行：先在通道页开启它" };
+    try {
+      const result = (await this.request("soundcard.download", {}, 180_000)) as {
+        ok?: boolean;
+        downloaded?: boolean;
+        bundled?: boolean;
+        message?: string;
+      };
+      const ok = result?.ok === true;
+      return {
+        ok,
+        downloaded: result?.downloaded === true ? true : undefined,
+        bundled: result?.bundled === true ? true : undefined,
+        message: typeof result?.message === "string" ? result.message : ok ? "驱动包已就位" : "下载失败，原因不明",
+      };
+    } catch (error) {
+      return { ok: false, message: `下载失败：${error instanceof Error ? error.message : String(error)}` };
+    }
+  }
+
+  /**
    * 一键装虚拟声卡：旁路会弹一次 UAC 提权跑随应用带的安装程序，装完还要重启微信与
    * 本应用才会认到设备。整个等待可能到两分钟，所以这里的超时给得比普通请求宽。
    */

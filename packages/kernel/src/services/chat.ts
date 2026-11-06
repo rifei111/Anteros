@@ -63,8 +63,12 @@ export class ChatService {
     /** 会话键：不同的人（或群）各自一条对话线，历史与上下文互不污染 */
     conversation?: string;
     presence?: { isTyping?: boolean; appFocused?: boolean; lastInteractionMs?: number };
-    /** 每发出一条分条时回调（内置外部通道用它把话转出去；客户端不用传） */
-    onPart?: (text: string, index: number) => void;
+    /**
+     * 每发出一条分条时回调（内置外部通道用它把话转出去；客户端不用传）。
+     * meta 说明这分条的性质：是不是要念出来的那句（voice）、是不是攒着没说的（hold）、
+     * 以及它落库的消息 id（发送失败时按 id 撤回语音气泡用）。
+     */
+    onPart?: (text: string, index: number, meta: { voice: boolean; hold: boolean; messageId: number }) => void;
     /** 群聊里这句话是谁说的：落库供界面显示，也拼进模型上下文，免得张冠李戴 */
     author?: { name?: string | null; id?: string | null };
     /** 允许它自己决定这次回不回（群聊「自己决定」模式）：模型可以只回一句「不回」 */
@@ -135,9 +139,9 @@ export class ChatService {
       // 语音要先转写、再进关系与记忆：抽取管线吃到 `[语音 12″]` 会把占位符记成事实（评审硬伤）。
       let userText = text;
       if (bound) {
-        ports.emit("event.typing", { state: "transcribe" });
+        ports.emit("event.typing", { state: "transcribe", conversation });
         const asr = await ports.media.transcribe(created.messageId);
-        ports.emit("event.typing", { state: "stop" });
+        ports.emit("event.typing", { state: "stop", conversation });
         if (!asr.ok) return this.replyToUnheard(created, conversation, asr.reason);
         if (asr.silent) return this.replyToUnheard(created, conversation, "这段语音里没有人声");
         userText = asr.text.trim();
@@ -280,12 +284,14 @@ export class ChatService {
         state: "start",
         plannedChars: firstPart.text.length,
         plannedMs: firstPart.typingMs,
+        conversation,
       });
 
       let deliveredTs = 0;
       let firstTokenTs = 0;
       const voiceByIndex = new Map(voices.map((item) => [item.index, item]));
       const voiceMessageIds: number[] = [];
+      try {
       for (let index = 0; index < plan.parts.length; index += 1) {
         const part = plan.parts[index]!;
         // 留着没说出口的那句：不落库、不发气泡（这一轮它是真的没吭声）
@@ -314,17 +320,26 @@ export class ChatService {
           text: part.text,
           delayAfterMs: part.delayAfterMs,
           typingMs: part.typingMs,
+          conversation,
         });
         if (input.onPart) {
           try {
-            input.onPart(part.text, index);
+            input.onPart(part.text, index, {
+              voice: voiceByIndex.has(index),
+              hold: Boolean(part.hold),
+              messageId: message.id,
+            });
           } catch (callbackError) {
             deps.log.warn(`onPart 回调失败：${(callbackError as Error)?.message ?? String(callbackError)}`);
           }
         }
         if (index < plan.parts.length - 1) await sleep(part.delayAfterMs);
       }
-      ports.emit("event.typing", { state: "stop" });
+      } finally {
+        // 不管这中间怎么炸的，「正在写」都得收掉：
+        // 用户报过「一直转着正在输入中，其实什么都没出来」，就是这里抛错跳过了这一行。
+        ports.emit("event.typing", { state: "stop", conversation });
+      }
 
       // 语音合成：外部通道要等它落盘（旁路要拿文件去播），应用内异步补上就行。
       const voiceResults: NonNullable<ChatReplyResult["voices"]> = [];
@@ -467,7 +482,10 @@ export class ChatService {
     const relation = ports.mind.getRelation();
     const status = ports.media.status();
     const external = conversation !== "app";
-    const externalVoiceOn = external ? this.parts.externalVoice() : false;
+    // 声音页那个档位是最外层开关：选了「纯文字」就整轮不出声，外部通道也不例外。
+    // 用户 2026-11-06 报的就是这个：档位选了纯文字，界面上还是生成了一条语音（只是没发到外部通道）。
+    const muted = status.voiceOutbound === "off";
+    const externalVoiceOn = external ? this.parts.externalVoice() && !muted : false;
     // 外部通道走单独的开关：打开后一条回复只发一条语音。
     // 这里传给 decideVoice 的是「外部通道 + 要不要发语音条」，由它按语音消息的口径
     // 判字数（200 字而不是 56 字）——用 56 字卡的话，开关开了也永远不出声。
